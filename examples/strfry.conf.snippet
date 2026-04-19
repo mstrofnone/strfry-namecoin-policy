@@ -1,0 +1,31 @@
+##
+## strfry.conf — Namecoin .bit NIP-05 write policy
+##
+## Add (or edit) the relay.writePolicy block below inside your existing
+## strfry.conf. strfry supports only one write-policy plugin at a time;
+## if you already have one, see the README for chaining strategies.
+##
+
+relay {
+    # ... your other relay settings ...
+
+    writePolicy {
+        # The plugin must be executable. If the path contains no spaces,
+        # strfry will also reload it automatically when its mtime changes.
+        #
+        # Environment variables are read by the plugin on startup:
+        #
+        #   NAMECOIN_ELECTRUMX_HOST       (required)
+        #   NAMECOIN_ELECTRUMX_PORT       (default: 50002 for TLS, 50001 for TCP)
+        #   NAMECOIN_ELECTRUMX_TLS        (default: true)
+        #   NAMECOIN_ELECTRUMX_CERT_PIN   (optional — SHA-256 of DER cert, hex)
+        #   NAMECOIN_POLICY_MODE          (kind0-only [default] | all-kinds-require-bit)
+        #   NAMECOIN_POLICY_CACHE_TTL_MS  (default: 300000)
+        #   NAMECOIN_POLICY_LOG_LEVEL     (silent | info [default] | debug)
+        #   NAMECOIN_POLICY_ALLOW_NON_BIT (default: true)
+        #
+        # Because strfry treats spaces in the plugin command as arguments,
+        # we pass env vars via a small wrapper script. See examples/wrapper.sh.
+        plugin = "/opt/strfry/plugins/strfry-namecoin-policy-wrapper.sh"
+    }
+}

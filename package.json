@@ -1,0 +1,45 @@
+{
+  "name": "strfry-namecoin-policy",
+  "version": "0.1.0",
+  "description": "strfry write-policy plugin: verifies Namecoin .bit NIP-05 identities against the Namecoin blockchain via ElectrumX before accepting Nostr events.",
+  "license": "MIT",
+  "author": "mstrofnone",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mstrofnone/strfry-namecoin-policy.git"
+  },
+  "homepage": "https://github.com/mstrofnone/strfry-namecoin-policy#readme",
+  "bugs": {
+    "url": "https://github.com/mstrofnone/strfry-namecoin-policy/issues"
+  },
+  "keywords": [
+    "nostr",
+    "strfry",
+    "namecoin",
+    "nip-05",
+    "electrumx",
+    "bit",
+    "relay",
+    "write-policy"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "strfry-namecoin-policy": "bin/strfry-namecoin-policy.js"
+  },
+  "main": "src/index.js",
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:live": "LIVE_ELECTRUMX=1 node test/live.js",
+    "start": "node bin/strfry-namecoin-policy.js"
+  },
+  "dependencies": {}
+}
