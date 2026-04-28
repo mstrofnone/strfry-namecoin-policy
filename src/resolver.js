@@ -1,6 +1,7 @@
 'use strict';
 
 const { LRUCache } = require('./cache');
+const { NullMetrics } = require('./metrics');
 
 // Bound on the post-namespace stem (the bit between `d/`/`id/` and end).
 // Namecoin doesn't enforce this exact value at consensus, but in practice
@@ -36,14 +37,18 @@ class NamecoinResolver {
    * @param {number} [opts.cacheTtlMs=300000]   long TTL for successful or fully-resolved-negative results
    * @param {number} [opts.negCacheTtlMs=30000] short TTL for parse-failure / transient negatives
    * @param {number} [opts.cacheMax=2000]
+   * @param {object} [opts.cache]    pre-built cache (LRUCache or PersistentLRU);
+   *                                 when set, cacheTtlMs/cacheMax are ignored
+   * @param {object} [opts.metrics]  metrics instance (Metrics|NullMetrics)
    * @param {(level:string,...args:any[])=>void} [opts.logger]
    */
-  constructor({ client, cacheTtlMs = 300_000, negCacheTtlMs = 30_000, cacheMax = 2000, logger, rateLimiter } = {}) {
+  constructor({ client, cacheTtlMs = 300_000, negCacheTtlMs = 30_000, cacheMax = 2000, cache, metrics, logger, rateLimiter } = {}) {
     if (!client) throw new Error('NamecoinResolver: client is required');
     this.client = client;
-    this.cache = new LRUCache({ max: cacheMax, ttlMs: cacheTtlMs });
+    this.cache = cache || new LRUCache({ max: cacheMax, ttlMs: cacheTtlMs });
     this.cacheTtlMs = cacheTtlMs;
     this.negCacheTtlMs = negCacheTtlMs;
+    this.metrics = metrics || new NullMetrics();
     this.logger = logger || (() => {});
     // Optional global ElectrumX lookup limiter. Cache hits MUST NOT count
     // against the budget, so this only fires on a true cache miss path.
@@ -215,8 +220,13 @@ class NamecoinResolver {
     const parsed = NamecoinResolver.parseIdentifier(identifier);
     if (!parsed) return null;
     const key = `${parsed.namecoinName}|${parsed.localPart}`;
+    this.metrics.inc('lookups_total');
     const cached = this.cache.get(key);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) {
+      this.metrics.inc('cache_hits_total');
+      return cached;
+    }
+    this.metrics.inc('cache_misses_total');
 
     // Cache miss: this will hit ElectrumX, so it counts against the budget.
     if (this.rateLimiter) {
