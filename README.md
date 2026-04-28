@@ -187,6 +187,55 @@ Make both files executable and restart strfry. A full example is in
 | `NAMECOIN_POLICY_CACHE_TTL_MS` | `300000` | TTL for resolver cache (ms). |
 | `NAMECOIN_POLICY_LOG_LEVEL` | `info` | `silent` / `info` / `debug`. Logs go to stderr and are captured by strfry. |
 | `NAMECOIN_POLICY_ALLOW_NON_BIT` | `true` | If `false`, kind:0 events with non-`.bit` NIP-05 identifiers are rejected. |
+| `NAMECOIN_ELECTRUMX_HOSTS` | — | Comma-separated `host:port[,host:port,…]` list. Overrides `*_HOST/*_PORT` when set. Round-robin with per-host circuit breaker (30s open, exp backoff to 5min). See [Operational](#operational). |
+| `NAMECOIN_ELECTRUMX_SOCKS5` | — | `host:port` of a no-auth SOCKS5 proxy (e.g. `127.0.0.1:9050` for Tor). DNS is delegated to the proxy. |
+| `NAMECOIN_POLICY_CACHE_PATH` | — | If set, both the resolver cache and verified-author set persist to this file. Uses `better-sqlite3` (optional dep) when available, falls back to a JSONL append-log otherwise. |
+| `NAMECOIN_POLICY_METRICS_PORT` | `0` | If non-zero, expose Prometheus metrics on `127.0.0.1:<port>/metrics`. Always bound to localhost. |
+| `NAMECOIN_POLICY_POOL_KEEPALIVE_MS` | `30000` | Idle timeout for the warm ElectrumX connection pool. Set to `0` to use one-connection-per-resolve mode. |
+
+## Operational
+
+For higher-traffic relays, the plugin supports several operational
+features that you can opt into via environment variables. All are
+off-by-default — the legacy single-host, per-resolve-connection,
+in-memory-cache behavior is preserved when these are unset.
+
+| Feature | Env var(s) | Example |
+|---|---|---|
+| Persistent cache | `NAMECOIN_POLICY_CACHE_PATH` | `NAMECOIN_POLICY_CACHE_PATH=/var/cache/strfry-namecoin/cache.db` |
+| Prometheus metrics | `NAMECOIN_POLICY_METRICS_PORT` | `NAMECOIN_POLICY_METRICS_PORT=9091` (curl `http://127.0.0.1:9091/metrics`) |
+| SOCKS5 / Tor | `NAMECOIN_ELECTRUMX_SOCKS5` | `NAMECOIN_ELECTRUMX_SOCKS5=127.0.0.1:9050` |
+| Connection pool | `NAMECOIN_POLICY_POOL_KEEPALIVE_MS` | `NAMECOIN_POLICY_POOL_KEEPALIVE_MS=60000` (`0` = disable) |
+| Multi-ElectrumX + circuit breaker | `NAMECOIN_ELECTRUMX_HOSTS` | `NAMECOIN_ELECTRUMX_HOSTS=ex1.example:50002,ex2.example:50002` |
+| Happy-eyeballs IPv6/IPv4 | *(automatic)* | When the host has both A and AAAA records, both are tried with a 250 ms stagger; the first connect wins. Skipped when SOCKS5 is enabled (proxy resolves names). |
+
+Metrics exported (Prometheus textfile format):
+
+- Counters: `lookups_total`, `cache_hits_total`, `cache_misses_total`,
+  `acceptances_total`, `rejections_total{reason="…"}`,
+  `electrumx_errors_total{type="timeout|socket|tls|cert-pin|parse|closed|socks5|dns|refused|unreachable|other"}`
+- Histogram: `lookup_duration_ms` with buckets
+  `[10, 50, 100, 250, 500, 1000, 2500, 5000, +Inf]`
+
+The metrics listener binds to `127.0.0.1` only — expose it externally
+via an explicit reverse proxy if you need remote scraping.
+
+The persistent cache splits into two sqlite namespaces in one file
+(`resolver` for name lookups, `verifiedAuthors` for the
+`all-kinds-require-bit` mode). If `better-sqlite3` is not installed
+(it's an `optionalDependencies` entry, so `npm install` won't fail if
+it can't build), we silently fall back to a JSONL append-log with
+periodic in-place compaction. If the cache file can't be opened at
+all, we log once and fall back to in-memory — a disk problem will
+never take the relay offline.
+
+The circuit breaker keeps each ElectrumX host in `closed` (healthy),
+`open` (recent failure, skip for cooldown), or `half-open` (one probe
+slot) state. Failures double the cooldown (30 s → 1 min → 2 min → 4
+min → 5 min cap); successes reset it. If every configured host is
+open, the plugin still round-robins through them — better to attempt
+a flapping ElectrumX than to soft-accept every event without
+verification.
 
 ## Supported identifier forms
 
