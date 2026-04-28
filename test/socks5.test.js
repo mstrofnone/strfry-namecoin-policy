@@ -135,7 +135,8 @@ test('connectSocks5: rejects when CONNECT fails', async () => {
 });
 
 test('connectSocks5: times out when proxy is silent', async () => {
-  const silentServer = net.createServer((_sock) => { /* never reply */ });
+  const peers = [];
+  const silentServer = net.createServer((sock) => { peers.push(sock); /* never reply */ });
   await new Promise((r) => silentServer.listen(0, '127.0.0.1', r));
   const port = silentServer.address().port;
   await assert.rejects(
@@ -146,6 +147,7 @@ test('connectSocks5: times out when proxy is silent', async () => {
     }),
     /SOCKS5 timeout/,
   );
+  for (const s of peers) { try { s.destroy(); } catch (_) {} }
   await new Promise((r) => silentServer.close(r));
 });
 
