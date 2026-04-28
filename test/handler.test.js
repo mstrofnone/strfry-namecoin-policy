@@ -220,3 +220,54 @@ test('handler: echoes event id on responses', async () => {
   const res = await handle(newEvent({ id: 'f'.repeat(64), kind: 1, content: '' }));
   assert.equal(res.id, 'f'.repeat(64));
 });
+
+// ── Hardening: fail-closed when no resolver ──
+test('handler: kind0 .bit with no resolver and softFail=false → reject', async () => {
+  const handle = makeHandler({
+    config: baseConfig({ softFail: false }),
+    resolver: null,                            // mimics missing NAMECOIN_ELECTRUMX_HOST
+    verifiedAuthors: new LRUCache({ max: 10 }),
+    logger: quietLogger,
+  });
+  const res = await handle(newEvent({
+    content: JSON.stringify({ nip05: 'alice@testls.bit' }),
+  }));
+  assert.equal(res.action, 'reject');
+  assert.match(res.msg, /verification unavailable/);
+});
+
+test('handler: kind0 .bit with no resolver and softFail=true → accept', async () => {
+  const handle = makeHandler({
+    config: baseConfig({ softFail: true }),
+    resolver: null,
+    verifiedAuthors: new LRUCache({ max: 10 }),
+    logger: quietLogger,
+  });
+  const res = await handle(newEvent({
+    content: JSON.stringify({ nip05: 'alice@testls.bit' }),
+  }));
+  assert.equal(res.action, 'accept');
+});
+
+// ── Hardening: rate-limit reject ──
+test('handler: rate-limited resolver → rate-limited reject message', async () => {
+  // Resolver stub that signals lastWasRateLimited=true and returns null.
+  const rlResolver = {
+    lastWasRateLimited: false,
+    async resolve() {
+      this.lastWasRateLimited = true;
+      return null;
+    },
+  };
+  const handle = makeHandler({
+    config: baseConfig(),
+    resolver: rlResolver,
+    verifiedAuthors: new LRUCache({ max: 10 }),
+    logger: quietLogger,
+  });
+  const res = await handle(newEvent({
+    content: JSON.stringify({ nip05: 'alice@testls.bit' }),
+  }));
+  assert.equal(res.action, 'reject');
+  assert.match(res.msg, /^rate-limited:/);
+});
