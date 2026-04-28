@@ -45,7 +45,13 @@ const OP_DROP         = 0x75;
 const OP_NAME_UPDATE      = 0x53;
 const OP_NAME_FIRSTUPDATE = 0x52;
 
-const NAME_EXPIRE_DEPTH = 36_000;  // Namecoin names expire after ~36k blocks (~36 weeks)
+// Namecoin names expire after 36 000 blocks (~36 weeks at 10-min blocks).
+// Source: namecoin-core src/names/main.cpp `CNamecoinHooks::IsExpired`,
+// which treats a name as expired when (current_tip - update_height) >= 36000.
+// See: https://github.com/namecoin/namecoin-core/blob/master/src/names/main.cpp
+// (constant `NAME_EXPIRATION_DEPTH` / `MAX_VALUE_LENGTH` in chainparams).
+// Keep this constant + the `>=` comparison below in sync with namecoin-core.
+const NAME_EXPIRE_DEPTH = 36_000;
 const MAX_HISTORY_WALK = 32;       // cap newest→oldest scan to bound work on adversarial histories
 const TIP_CACHE_TTL_MS = 60_000;   // 60s in-process cache for chain tip
 const VERSION_HANDSHAKE_TIMEOUT_MS = 2000; // dedicated short timeout for server.version
@@ -120,7 +126,6 @@ function verifyCertPins(socket, pins) {
     throw new Error(`Cert pin mismatch: no configured pin matched (observed ${observed})`);
   }
 }
-
 
 class ElectrumXClient extends EventEmitter {
   /**
