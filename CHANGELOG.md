@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Documentation
+- Clarify in README that the plugin talks **only** to ElectrumX (TCP/TLS)
+  and never opens a JSON-RPC connection to `namecoind`. Add a
+  "Deployment topologies" section covering external public ElectrumX,
+  self-hosted ElectrumX + namecoind, and load-balanced failover.
+
 ## [0.1.0] — 2026-04-19
 
 ### Added
