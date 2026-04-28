@@ -187,6 +187,8 @@ Make both files executable and restart strfry. A full example is in
 | `NAMECOIN_POLICY_CACHE_TTL_MS` | `300000` | TTL for resolver cache (ms). |
 | `NAMECOIN_POLICY_LOG_LEVEL` | `info` | `silent` / `info` / `debug`. Logs go to stderr and are captured by strfry. |
 | `NAMECOIN_POLICY_ALLOW_NON_BIT` | `true` | If `false`, kind:0 events with non-`.bit` NIP-05 identifiers are rejected. |
+| `NAMECOIN_POLICY_MIN_CONFIRMATIONS` | `1` | Minimum confirmations a Namecoin name-update tx must have before it's trusted. `0` allows mempool/unconfirmed tx (testing only). Higher values harden against reorgs and malicious-server fabrication at the cost of slightly slower propagation. |
+| `NAMECOIN_POLICY_NEG_CACHE_TTL_MS` | `30000` | Short TTL for *parse-failure* negatives (malformed JSON, missing `nostr` key, ElectrumX returned null). Successful negatives — e.g. `bob@x.bit` looking up a record that lists only `_` and `alice` — still use the long `NAMECOIN_POLICY_CACHE_TTL_MS`. |
 
 ## Supported identifier forms
 

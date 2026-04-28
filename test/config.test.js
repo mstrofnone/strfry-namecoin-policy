@@ -53,3 +53,58 @@ test('loadConfig: parses booleans', () => {
   });
   assert.equal(c.allowNonBit, false);
 });
+
+test('loadConfig: NAMECOIN_POLICY_MIN_CONFIRMATIONS defaults to 1', () => {
+  const c = loadConfig({ NAMECOIN_ELECTRUMX_HOST: 'x' });
+  assert.equal(c.minConfirmations, 1);
+});
+
+test('loadConfig: NAMECOIN_POLICY_MIN_CONFIRMATIONS honors 0 (for tests)', () => {
+  const c = loadConfig({
+    NAMECOIN_ELECTRUMX_HOST: 'x',
+    NAMECOIN_POLICY_MIN_CONFIRMATIONS: '0',
+  });
+  assert.equal(c.minConfirmations, 0);
+});
+
+test('loadConfig: NAMECOIN_POLICY_MIN_CONFIRMATIONS accepts a positive int', () => {
+  const c = loadConfig({
+    NAMECOIN_ELECTRUMX_HOST: 'x',
+    NAMECOIN_POLICY_MIN_CONFIRMATIONS: '6',
+  });
+  assert.equal(c.minConfirmations, 6);
+});
+
+test('loadConfig: NAMECOIN_POLICY_MIN_CONFIRMATIONS rejects non-integer', () => {
+  assert.throws(() => loadConfig({
+    NAMECOIN_ELECTRUMX_HOST: 'x',
+    NAMECOIN_POLICY_MIN_CONFIRMATIONS: 'six',
+  }), /NAMECOIN_POLICY_MIN_CONFIRMATIONS/);
+});
+
+test('loadConfig: NAMECOIN_POLICY_MIN_CONFIRMATIONS rejects negative', () => {
+  assert.throws(() => loadConfig({
+    NAMECOIN_ELECTRUMX_HOST: 'x',
+    NAMECOIN_POLICY_MIN_CONFIRMATIONS: '-1',
+  }), /NAMECOIN_POLICY_MIN_CONFIRMATIONS/);
+});
+
+test('loadConfig: NAMECOIN_POLICY_NEG_CACHE_TTL_MS defaults to 30000', () => {
+  const c = loadConfig({ NAMECOIN_ELECTRUMX_HOST: 'x' });
+  assert.equal(c.negCacheTtlMs, 30_000);
+});
+
+test('loadConfig: NAMECOIN_POLICY_NEG_CACHE_TTL_MS honors override', () => {
+  const c = loadConfig({
+    NAMECOIN_ELECTRUMX_HOST: 'x',
+    NAMECOIN_POLICY_NEG_CACHE_TTL_MS: '5000',
+  });
+  assert.equal(c.negCacheTtlMs, 5000);
+});
+
+test('loadConfig: NAMECOIN_POLICY_NEG_CACHE_TTL_MS rejects garbage', () => {
+  assert.throws(() => loadConfig({
+    NAMECOIN_ELECTRUMX_HOST: 'x',
+    NAMECOIN_POLICY_NEG_CACHE_TTL_MS: 'never',
+  }), /NAMECOIN_POLICY_NEG_CACHE_TTL_MS/);
+});

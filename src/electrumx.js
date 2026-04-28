@@ -46,6 +46,17 @@ const OP_NAME_UPDATE      = 0x53;
 const OP_NAME_FIRSTUPDATE = 0x52;
 
 const NAME_EXPIRE_DEPTH = 36_000;  // Namecoin names expire after ~36k blocks (~36 weeks)
+const MAX_HISTORY_WALK = 32;       // cap newest→oldest scan to bound work on adversarial histories
+const TIP_CACHE_TTL_MS = 60_000;   // 60s in-process cache for chain tip
+const VERSION_HANDSHAKE_TIMEOUT_MS = 2000; // dedicated short timeout for server.version
+
+// Module-level chain-tip cache. Stale-by-60s is safe because expiry math
+// has a 36000-block grace window.
+let cachedTip = null;
+let cachedTipAt = 0;
+
+/** Test-only: reset the module-level tip cache. */
+function _resetTipCacheForTests() { cachedTip = null; cachedTipAt = 0; }
 
 class ElectrumXClient extends EventEmitter {
   /**
@@ -57,6 +68,7 @@ class ElectrumXClient extends EventEmitter {
    * @param {boolean} [opts.rejectUnauthorized]  override default (default: true unless pinning)
    * @param {number} [opts.timeoutMs=5000]
    * @param {number} [opts.retries=2]
+   * @param {number} [opts.minConfirmations=1]  minimum confirmations a tx must have to be trusted
    * @param {(level:string,...args:any[])=>void} [opts.logger]
    */
   constructor(opts = {}) {
@@ -71,6 +83,9 @@ class ElectrumXClient extends EventEmitter {
     this.rejectUnauthorized = opts.rejectUnauthorized ?? !this.certPinSha256;
     this.timeoutMs = Number(opts.timeoutMs) || 5000;
     this.retries = Number.isFinite(opts.retries) ? opts.retries : 2;
+    this.minConfirmations = Number.isFinite(opts.minConfirmations)
+      ? Math.max(0, Math.floor(opts.minConfirmations))
+      : 1;
     this.logger = opts.logger || (() => {});
   }
 
@@ -156,8 +171,20 @@ class ElectrumXClient extends EventEmitter {
       };
 
       const doResolve = async () => {
-        // 1. Handshake — the server may require it before other calls
-        await send('server.version', ['strfry-namecoin-policy/0.1', '1.4']).catch(() => null);
+        // 1. Handshake — many servers reject subsequent calls (or drop the
+        //    connection) if you race past the version handshake. Treat
+        //    failure here as a connect-level failure so the retry loop
+        //    kicks in. Use a tight timeout so a dead server doesn't burn
+        //    the entire per-attempt budget on the handshake alone.
+        try {
+          await withTimeout(
+            send('server.version', ['strfry-namecoin-policy/0.2', '1.4']),
+            VERSION_HANDSHAKE_TIMEOUT_MS,
+            `server.version handshake timed out after ${VERSION_HANDSHAKE_TIMEOUT_MS}ms`
+          );
+        } catch (e) {
+          throw new Error(`ElectrumX handshake failed: ${e.message}`);
+        }
 
         // 2. Canonical name-index scripthash
         const script = buildNameIndexScript(Buffer.from(name, 'ascii'));
@@ -169,43 +196,32 @@ class ElectrumXClient extends EventEmitter {
           // No history ⇒ name has never existed (or the server has no name index).
           return null;
         }
-        // Latest = last element of the list
-        const latest = history[history.length - 1];
-        const txHash = latest && latest.tx_hash;
-        const height = latest && typeof latest.height === 'number' ? latest.height : 0;
-        if (typeof txHash !== 'string') return null;
 
-        // 4. Fetch tx (verbose)
-        const tx = await send('blockchain.transaction.get', [txHash, true]);
-
-        // 5. Tip (for expiry check)
+        // 4. Tip (for confirmation filter + expiry math). Use module-level
+        //    cache; only call subscribe on cache miss.
         let tip = null;
-        try {
-          const headers = await send('blockchain.headers.subscribe', []);
-          if (headers && typeof headers.height === 'number') tip = headers.height;
-        } catch (_) { /* some servers may not have subscribe; tolerate */ }
-
-        if (tip != null && height > 0 && (tip - height) >= NAME_EXPIRE_DEPTH) {
-          const err = new Error(`Namecoin name "${name}" expired`);
-          err.electrumxDefinitive = true;
-          throw err;
+        const now = Date.now();
+        if (cachedTip != null && (now - cachedTipAt) < TIP_CACHE_TTL_MS) {
+          tip = cachedTip;
+        } else {
+          try {
+            const headers = await send('blockchain.headers.subscribe', []);
+            if (headers && typeof headers.height === 'number') {
+              tip = headers.height;
+              cachedTip = tip;
+              cachedTipAt = now;
+            }
+          } catch (_) { /* some servers may not have subscribe; tolerate */ }
         }
 
-        // 6. Parse NAME_* script from the vouts
-        const parsed = parseNameFromTx(tx, name);
-        if (!parsed) return null;
-
-        const result = {
-          name: parsed.name,
-          value: parsed.value,
-          txid: txHash,
-          height,
-        };
-        if (tip != null && height > 0) {
-          result.expires_in = NAME_EXPIRE_DEPTH - (tip - height);
-          result.tip = tip;
-        }
-        return result;
+        // 5+6+7. Filter history, walk newest → oldest, parse, expiry-check.
+        const fetchTx = (txHash) => send('blockchain.transaction.get', [txHash, true]);
+        return await selectNameRowFromHistory({
+          name, history, tip,
+          minConfirmations: this.minConfirmations,
+          fetchTx,
+          logger: this.logger,
+        });
       };
 
       try {
@@ -365,16 +381,24 @@ function readPushData(script, pos) {
   return null;
 }
 
+// Namecoin's `rand` value in NAME_FIRSTUPDATE is exactly 20 bytes
+// (160 bits). Anything else is either malformed or an UPDATE-shaped
+// script that happens to start with the OP_NAME_FIRSTUPDATE opcode
+// because of a script-template collision. Validate it strictly so we
+// don't mis-parse and treat a junk middle push as `rand`.
+const NAME_FIRSTUPDATE_RAND_LEN = 20;
+
 /**
  * Parse a NAME_* script and return {name, value}.
  *
  * Script layout:
- *   <OP_NAME_UPDATE or OP_NAME_FIRSTUPDATE> <push(name)> [<push(rand)>] <push(value)> OP_2DROP OP_DROP <address script...>
+ *   <OP_NAME_UPDATE or OP_NAME_FIRSTUPDATE> <push(name)> [<push(rand=20B)>] <push(value)> OP_2DROP OP_DROP <address script...>
  *
- * NAME_FIRSTUPDATE has an extra 'rand' push between name and value. We
- * detect it by looking ahead: if the next push-data after the name is
- * short (<= 32 bytes) AND is followed by another push-data before
- * OP_2DROP, we treat it as the rand and skip to the value.
+ * NAME_FIRSTUPDATE has an extra 'rand' push between name and value
+ * which MUST be exactly 20 bytes. If a candidate FIRSTUPDATE script
+ * has a middle push of any other length we fall through to the
+ * 2-push (UPDATE-style) interpretation rather than blindly skipping
+ * a push of unknown size.
  *
  * @param {Buffer} script
  * @returns {{name:string, value:string, op:number}|null}
@@ -389,12 +413,19 @@ function parseNameScript(script) {
 
   let valueBuf = null;
   if (op === OP_NAME_FIRSTUPDATE) {
-    // name, rand, value
+    // name, rand(20B), value
     const rand = readPushData(script, first.next);
-    if (!rand) return null;
-    const v = readPushData(script, rand.next);
-    if (!v) return null;
-    valueBuf = v.data;
+    if (rand && rand.data.length === NAME_FIRSTUPDATE_RAND_LEN) {
+      const v = readPushData(script, rand.next);
+      if (!v) return null;
+      valueBuf = v.data;
+    } else {
+      // Malformed FIRSTUPDATE — fall back to the 2-push UPDATE shape
+      // rather than mis-parsing the middle push as `rand`.
+      const v = readPushData(script, first.next);
+      if (!v) return null;
+      valueBuf = v.data;
+    }
   } else {
     // name, value
     const v = readPushData(script, first.next);
@@ -436,7 +467,114 @@ function parseNameFromTx(tx, expectedName) {
   return null;
 }
 
+/**
+ * Pure(ish) helper: given an ElectrumX history list, the chain tip, a
+ * confirmation requirement, and a tx fetcher, pick the highest-height
+ * confirmed tx whose vouts contain a NAME_UPDATE / NAME_FIRSTUPDATE for
+ * the requested name. Returns the same shape as nameShow.
+ *
+ * Implements three correctness fixes:
+ *   1. Filters out mempool/unconfirmed (height <= 0) and entries with
+ *      fewer than minConfirmations confirmations BEFORE picking.
+ *   2. Walks newest → oldest (capped at MAX_HISTORY_WALK) so a junk UTXO
+ *      that landed on the canonical scripthash can't censor the real
+ *      name.
+ *   3. Uses the actual chosen tx's height for expiry math.
+ *
+ * @param {object} args
+ * @param {string} args.name
+ * @param {Array<{tx_hash:string, height:number}>} args.history
+ * @param {number|null} args.tip
+ * @param {number} args.minConfirmations
+ * @param {(txHash:string)=>Promise<any>} args.fetchTx
+ * @param {(level:string,...args:any[])=>void} [args.logger]
+ * @returns {Promise<{name:string,value:string,txid:string,height:number,expires_in?:number,tip?:number}|null>}
+ */
+async function selectNameRowFromHistory({ name, history, tip, minConfirmations, fetchTx, logger }) {
+  const log = logger || (() => {});
+  if (!Array.isArray(history) || history.length === 0) return null;
+
+  const minConf = Number.isFinite(minConfirmations) ? Math.max(0, Math.floor(minConfirmations)) : 1;
+
+  // Filter: drop unconfirmed (height <= 0) and under-confirmed entries.
+  const filtered = [];
+  for (const h of history) {
+    if (!h || typeof h.tx_hash !== 'string') continue;
+    const ht = typeof h.height === 'number' ? h.height : 0;
+    if (ht <= 0) continue;
+    if (tip != null && minConf > 0) {
+      const conf = (tip - ht) + 1;
+      if (conf < minConf) continue;
+    }
+    filtered.push({ tx_hash: h.tx_hash, height: ht });
+  }
+  if (filtered.length === 0) return null;
+
+  // Newest → oldest by height.
+  filtered.sort((a, b) => b.height - a.height);
+
+  // Walk; pick first tx whose vouts contain a NAME_* for the exact name.
+  const walk = filtered.slice(0, MAX_HISTORY_WALK);
+  let chosenHeight = 0;
+  let chosenTxHash = null;
+  let chosenParsed = null;
+  for (const entry of walk) {
+    let tx;
+    try {
+      tx = await fetchTx(entry.tx_hash);
+    } catch (e) {
+      log('debug', `electrumx tx.get(${entry.tx_hash}) failed: ${e.message}`);
+      continue;
+    }
+    const parsed = parseNameFromTx(tx, name);
+    if (!parsed) continue;
+    chosenHeight = entry.height;
+    chosenTxHash = entry.tx_hash;
+    chosenParsed = parsed;
+    break;
+  }
+  if (!chosenParsed) return null;
+
+  // Expiry uses the chosen tx's height — not the latest history entry.
+  if (tip != null && chosenHeight > 0 && (tip - chosenHeight) >= NAME_EXPIRE_DEPTH) {
+    const err = new Error(`Namecoin name "${name}" expired`);
+    err.electrumxDefinitive = true;
+    throw err;
+  }
+
+  const result = {
+    name: chosenParsed.name,
+    value: chosenParsed.value,
+    txid: chosenTxHash,
+    height: chosenHeight,
+  };
+  if (tip != null && chosenHeight > 0) {
+    result.expires_in = NAME_EXPIRE_DEPTH - (tip - chosenHeight);
+    result.tip = tip;
+  }
+  return result;
+}
+
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+/**
+ * Wrap a promise with a per-call timeout. The original promise keeps
+ * running but the returned promise rejects after `ms`.
+ * @template T
+ * @param {Promise<T>} p
+ * @param {number} ms
+ * @param {string} msg
+ * @returns {Promise<T>}
+ */
+function withTimeout(p, ms, msg) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(msg)), ms);
+    p.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); }
+    );
+  });
+}
 
 module.exports = {
   ElectrumXClient,
@@ -450,4 +588,8 @@ module.exports = {
   OP_NAME_UPDATE,
   OP_NAME_FIRSTUPDATE,
   NAME_EXPIRE_DEPTH,
+  MAX_HISTORY_WALK,
+  TIP_CACHE_TTL_MS,
+  selectNameRowFromHistory,
+  _resetTipCacheForTests,
 };

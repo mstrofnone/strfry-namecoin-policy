@@ -24,6 +24,13 @@ function loadConfig(env = process.env) {
   const insecure = parseBool(env.NAMECOIN_ELECTRUMX_INSECURE, false);
   const certPinSha256 = env.NAMECOIN_ELECTRUMX_CERT_PIN || null;
 
+  const minConf = parsePosInt(
+    env.NAMECOIN_POLICY_MIN_CONFIRMATIONS, 1, 'NAMECOIN_POLICY_MIN_CONFIRMATIONS', { allowZero: true }
+  );
+  const negCacheTtlMs = parsePosInt(
+    env.NAMECOIN_POLICY_NEG_CACHE_TTL_MS, 30_000, 'NAMECOIN_POLICY_NEG_CACHE_TTL_MS', { allowZero: true }
+  );
+
   return {
     host,
     port,
@@ -36,9 +43,27 @@ function loadConfig(env = process.env) {
     retries:   parseInt(env.NAMECOIN_ELECTRUMX_RETRIES   || '2',    10),
     mode,
     cacheTtlMs: parseInt(env.NAMECOIN_POLICY_CACHE_TTL_MS || '300000', 10),
+    negCacheTtlMs,
+    minConfirmations: minConf,
     logLevel,
     allowNonBit: parseBool(env.NAMECOIN_POLICY_ALLOW_NON_BIT, true),
   };
+}
+
+/**
+ * Parse a non-negative integer env var. Throws on invalid input so
+ * misconfiguration fails fast at startup instead of silently degrading.
+ */
+function parsePosInt(raw, dflt, varName, { allowZero = false } = {}) {
+  if (raw == null || raw === '') return dflt;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n)) {
+    throw new Error(`${varName}: invalid value "${raw}" (expected integer)`);
+  }
+  if (n < 0 || (!allowZero && n === 0)) {
+    throw new Error(`${varName}: invalid value "${raw}" (must be ${allowZero ? '≥0' : '>0'})`);
+  }
+  return n;
 }
 
 function parseBool(val, dflt) {

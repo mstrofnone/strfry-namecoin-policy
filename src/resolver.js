@@ -24,14 +24,17 @@ class NamecoinResolver {
   /**
    * @param {object} opts
    * @param {import('./electrumx').ElectrumXClient} opts.client
-   * @param {number} [opts.cacheTtlMs=300000]
+   * @param {number} [opts.cacheTtlMs=300000]   long TTL for successful or fully-resolved-negative results
+   * @param {number} [opts.negCacheTtlMs=30000] short TTL for parse-failure / transient negatives
    * @param {number} [opts.cacheMax=2000]
    * @param {(level:string,...args:any[])=>void} [opts.logger]
    */
-  constructor({ client, cacheTtlMs = 300_000, cacheMax = 2000, logger } = {}) {
+  constructor({ client, cacheTtlMs = 300_000, negCacheTtlMs = 30_000, cacheMax = 2000, logger } = {}) {
     if (!client) throw new Error('NamecoinResolver: client is required');
     this.client = client;
     this.cache = new LRUCache({ max: cacheMax, ttlMs: cacheTtlMs });
+    this.cacheTtlMs = cacheTtlMs;
+    this.negCacheTtlMs = negCacheTtlMs;
     this.logger = logger || (() => {});
   }
 
@@ -190,10 +193,32 @@ class NamecoinResolver {
     if (cached !== undefined) return cached;
 
     let result = null;
+    let row = null;
+    // Categorize the negative result for cache TTL purposes:
+    //   'success-negative'  → record exists, JSON parses, nostr present,
+    //                         but no key matches THIS local part. Stable
+    //                         answer; safe to cache long.
+    //   'parse-failure'     → record exists but its value isn't
+    //                         parseable / has no nostr field, OR
+    //                         nameShow returned null. Could be a
+    //                         transient ElectrumX issue or a publisher
+    //                         mid-flight; cache short.
+    let negKind = null;
     try {
-      const row = await this.client.nameShow(parsed.namecoinName);
+      row = await this.client.nameShow(parsed.namecoinName);
       if (row && typeof row.value === 'string') {
         result = NamecoinResolver.extractFromValue(row.value, parsed.localPart, parsed.namecoinName);
+        if (result === null) {
+          negKind = classifyParseFailure(row.value) ? 'parse-failure' : 'success-negative';
+        }
+      } else if (row === null) {
+        // nameShow returned null — could be "never existed" or a
+        // transient ElectrumX hiccup the client swallowed. Be safe and
+        // use the short TTL so we don't cache a stale-no-record for 5min.
+        negKind = 'parse-failure';
+      } else {
+        // row exists but row.value is not a string — malformed.
+        negKind = 'parse-failure';
       }
     } catch (err) {
       this.logger('info', `namecoin resolve error for ${identifier}: ${err.message}`);
@@ -201,9 +226,33 @@ class NamecoinResolver {
       return null;
     }
 
-    this.cache.set(key, result);
+    if (result === null && negKind === 'parse-failure' && this.negCacheTtlMs !== this.cacheTtlMs) {
+      // Short-TTL negative cache for parse failures / transient nulls so
+      // a hiccup doesn't poison for the full long-cache window.
+      this.cache.set(key, result, { ttlMs: this.negCacheTtlMs });
+    } else {
+      this.cache.set(key, result);
+    }
     return result;
   }
+}
+
+/**
+ * Decide whether a Namecoin name value that produced no resolved pubkey
+ * looks like a parse failure (malformed/no-nostr) or a successful
+ * negative (well-formed record, just no entry for this local-part).
+ *
+ * Returns true for parse failures, false for success-negatives.
+ */
+function classifyParseFailure(valueJson) {
+  if (typeof valueJson !== 'string' || !valueJson) return true;
+  let doc;
+  try { doc = JSON.parse(valueJson); } catch (_) { return true; }
+  if (!doc || typeof doc !== 'object' || Array.isArray(doc)) return true;
+  if (doc.nostr == null) return true;
+  // nostr is present in some recognized shape — the lookup was a
+  // proper negative for this local-part.
+  return false;
 }
 
 module.exports = { NamecoinResolver };
