@@ -124,18 +124,56 @@ class NamecoinResolver {
       return null;
     }
 
-    // Domain namespace: {"nostr": {"names": {"_": "<hex>", ...}, "relays": {...}}}
+    // Domain namespace.
+    //
+    // Two object shapes are accepted:
+    //
+    //   1. Extended NIP-05-like form (used when one name covers many
+    //      sub-identities):
+    //        {"nostr": {"names": {"_": "<hex>", "alice": "<hex>"},
+    //                   "relays": {"<hex>": [...]}}}
+    //
+    //   2. Single-identity form (same shape used by id/, natural for a
+    //      one-owner name):
+    //        {"nostr": {"pubkey": "<hex>", "relays": [...]}}
+    //      Only the root local-part (`_`) resolves from this shape; a
+    //      request for `alice@example.bit` against a single-identity
+    //      record falls through to null because there's no sub-identity
+    //      dictionary.
+    //
+    // If a record carries BOTH (a publisher mistake or migration), the
+    // names dict wins for non-root lookups, and the names["_"] entry
+    // wins for root lookups, falling back to the bare pubkey field.
     const names = nostr.names;
-    if (!names || typeof names !== 'object') return null;
-    const pk = names[localPart];
-    if (typeof pk !== 'string' || !HEX64_RE.test(pk)) return null;
-
-    let relays = [];
-    if (nostr.relays && typeof nostr.relays === 'object') {
-      const r = nostr.relays[pk];
-      if (Array.isArray(r)) relays = r.filter((x) => typeof x === 'string');
+    if (names && typeof names === 'object') {
+      const pk = names[localPart];
+      if (typeof pk === 'string' && HEX64_RE.test(pk)) {
+        let relays = [];
+        if (nostr.relays && typeof nostr.relays === 'object' && !Array.isArray(nostr.relays)) {
+          const r = nostr.relays[pk];
+          if (Array.isArray(r)) relays = r.filter((x) => typeof x === 'string');
+        }
+        return { pubkey: pk.toLowerCase(), relays };
+      }
+      // Don't fall back to single-identity for non-root lookups when a
+      // names dict is present — it would silently hand `alice@example.bit`
+      // the root operator's pubkey, which is wrong.
+      if (localPart !== '_') return null;
     }
-    return { pubkey: pk.toLowerCase(), relays };
+
+    // Single-identity form. Only root is resolvable.
+    if (
+      localPart === '_' &&
+      typeof nostr.pubkey === 'string' &&
+      HEX64_RE.test(nostr.pubkey)
+    ) {
+      const relays = Array.isArray(nostr.relays)
+        ? nostr.relays.filter((r) => typeof r === 'string')
+        : [];
+      return { pubkey: nostr.pubkey.toLowerCase(), relays };
+    }
+
+    return null;
   }
 
   /**
