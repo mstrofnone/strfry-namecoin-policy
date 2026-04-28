@@ -95,6 +95,97 @@ test('extractFromValue: identity namespace object', () => {
   );
 });
 
+// ─── Single-identity object form on d/ ──────────────────────────────────────
+//
+// ifa-0001 doesn't mandate that domain records use the `nostr.names`
+// sub-dictionary. Operators who own a name outright commonly publish:
+//
+//   {"nostr": {"pubkey": "<hex>", "relays": ["wss://..."]}}
+//
+// (The same shape `id/` records use.) Resolve only the root local-part
+// from this shape — there's no sub-identity dictionary, so a request for
+// `alice@example.bit` against this shape correctly falls through to null.
+
+test('extractFromValue: domain single-identity object form (d/mstrofnone)', () => {
+  const json = JSON.stringify({
+    nostr: {
+      pubkey: PK_ROOT,
+      relays: ['wss://relay.testls.bit/', 'wss://relay.nostr.wine/'],
+    },
+  });
+  assert.deepEqual(
+    NamecoinResolver.extractFromValue(json, '_', 'd/mstrofnone'),
+    { pubkey: PK_ROOT, relays: ['wss://relay.testls.bit/', 'wss://relay.nostr.wine/'] }
+  );
+});
+
+test('extractFromValue: domain single-identity form does NOT resolve non-root', () => {
+  const json = JSON.stringify({ nostr: { pubkey: PK_ROOT } });
+  assert.equal(
+    NamecoinResolver.extractFromValue(json, 'alice', 'd/mstrofnone'),
+    null
+  );
+});
+
+test('extractFromValue: domain single-identity form without relays still works', () => {
+  const json = JSON.stringify({ nostr: { pubkey: PK_ROOT } });
+  assert.deepEqual(
+    NamecoinResolver.extractFromValue(json, '_', 'd/mstrofnone'),
+    { pubkey: PK_ROOT, relays: [] }
+  );
+});
+
+test('extractFromValue: domain single-identity form rejects malformed pubkey', () => {
+  const json = JSON.stringify({ nostr: { pubkey: 'not-a-hex-pubkey' } });
+  assert.equal(
+    NamecoinResolver.extractFromValue(json, '_', 'd/x'),
+    null
+  );
+});
+
+test('extractFromValue: hybrid record — names dict wins for sub-identities, falls back to bare pubkey for root', () => {
+  // Publisher mistake or migration: a record with both `names` and a bare
+  // `pubkey`. Named sub-identities resolve through the names dict, which
+  // is more specific. Root falls back to the bare `pubkey` if names has
+  // no `_` entry. Importantly, a non-root lookup that misses the names
+  // dict must NOT silently return the root pubkey — that would hand
+  // alice@example.bit the root operator's identity.
+  const json = JSON.stringify({
+    nostr: {
+      pubkey: PK_ROOT,
+      names: { alice: PK_ALICE },
+    },
+  });
+  // alice resolves through the names dict.
+  assert.deepEqual(
+    NamecoinResolver.extractFromValue(json, 'alice', 'd/example'),
+    { pubkey: PK_ALICE, relays: [] }
+  );
+  // Non-existent named lookup must NOT silently fall back to bare pubkey.
+  assert.equal(
+    NamecoinResolver.extractFromValue(json, 'nobody', 'd/example'),
+    null
+  );
+  // Root falls back to the bare `pubkey` since names has no `_` entry.
+  assert.deepEqual(
+    NamecoinResolver.extractFromValue(json, '_', 'd/example'),
+    { pubkey: PK_ROOT, relays: [] }
+  );
+});
+
+test('extractFromValue: hybrid record with explicit names["_"] beats bare pubkey', () => {
+  const json = JSON.stringify({
+    nostr: {
+      pubkey: PK_ALICE, // would be the fallback
+      names: { _: PK_ROOT },
+    },
+  });
+  assert.deepEqual(
+    NamecoinResolver.extractFromValue(json, '_', 'd/example'),
+    { pubkey: PK_ROOT, relays: [] }
+  );
+});
+
 test('extractFromValue: rejects non-hex', () => {
   assert.equal(
     NamecoinResolver.extractFromValue(JSON.stringify({ nostr: 'notahexstring' }), '_', 'd/x'),
