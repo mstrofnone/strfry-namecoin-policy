@@ -54,10 +54,10 @@ function makeLogger(level) {
   const lv = levels[level] ?? 1;
   return (msgLevel, ...args) => {
     const mlv = levels[msgLevel] ?? 1;
-    if (mlv <= lv && mlv > 0) {
-      // strfry captures stderr into its own logs
-      console.error(`[strfry-namecoin-policy ${msgLevel}]`, ...args);
-    }
+    if (mlv === 0) return; // silent class messages — never logged
+    if (mlv > lv) return;  // below threshold
+    // strfry captures stderr into its own logs
+    console.error(`[strfry-namecoin-policy ${msgLevel}]`, ...args);
   };
 }
 
