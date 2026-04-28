@@ -50,6 +50,64 @@ test('parseIdentifier: rejects multi-level .bit (sub.example.bit)', () => {
   assert.equal(NamecoinResolver.parseIdentifier('sub.example.bit'), null);
 });
 
+// ── Hardening: bound name length ──
+test('parseIdentifier: accepts stem of exactly 64 chars', () => {
+  const stem = 'a'.repeat(64);
+  assert.deepEqual(NamecoinResolver.parseIdentifier(`${stem}.bit`),
+    { namecoinName: `d/${stem}`, localPart: '_' });
+});
+
+test('parseIdentifier: rejects stem longer than 64 chars (.bit)', () => {
+  const stem = 'a'.repeat(65);
+  assert.equal(NamecoinResolver.parseIdentifier(`${stem}.bit`), null);
+  assert.equal(NamecoinResolver.parseIdentifier(`alice@${stem}.bit`), null);
+});
+
+test('parseIdentifier: rejects stem longer than 64 chars (d/ direct)', () => {
+  const stem = 'a'.repeat(65);
+  assert.equal(NamecoinResolver.parseIdentifier(`d/${stem}`), null);
+  assert.equal(NamecoinResolver.parseIdentifier(`id/${stem}`), null);
+});
+
+// ── Hardening: rate limiter integration ──
+test('resolve: rate-limited (acquire returns false) returns null and sets flag', async () => {
+  const client = {
+    calls: 0,
+    async nameShow() { this.calls++; return null; },
+  };
+  const limiter = { async acquire() { return false; } };
+  const r = new NamecoinResolver({ client, rateLimiter: limiter });
+  const res = await r.resolve('alice@testls.bit');
+  assert.equal(res, null);
+  assert.equal(r.lastWasRateLimited, true);
+  assert.equal(client.calls, 0, 'must NOT call ElectrumX when throttled');
+});
+
+test('resolve: cache hit does NOT consume a rate-limit token', async () => {
+  const client = {
+    calls: 0,
+    async nameShow() {
+      this.calls++;
+      return { name: 'd/testls', value: JSON.stringify({ nostr: 'a'.repeat(64) }) };
+    },
+  };
+  let acquireCount = 0;
+  const limiter = { async acquire() { acquireCount++; return true; } };
+  const r = new NamecoinResolver({ client, rateLimiter: limiter, cacheTtlMs: 60_000 });
+
+  // First resolve: cache miss, must acquire.
+  const first = await r.resolve('testls.bit');
+  assert.ok(first);
+  assert.equal(acquireCount, 1);
+  assert.equal(client.calls, 1);
+
+  // Second resolve same key: cache hit, must NOT acquire.
+  const second = await r.resolve('testls.bit');
+  assert.ok(second);
+  assert.equal(acquireCount, 1, 'cache hit must not consume a token');
+  assert.equal(client.calls, 1);
+});
+
 test('extractFromValue: simple domain form', () => {
   const json = JSON.stringify({ nostr: PK_ROOT });
   assert.deepEqual(
