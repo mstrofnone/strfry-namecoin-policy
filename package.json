@@ -25,13 +25,16 @@
   "engines": {
     "node": ">=18"
   },
+  "type": "commonjs",
   "bin": {
     "strfry-namecoin-policy": "bin/strfry-namecoin-policy.js"
   },
   "main": "src/index.js",
+  "types": "dist/index.d.ts",
   "files": [
     "bin/",
     "src/",
+    "dist/",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"
@@ -39,7 +42,11 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "test:live": "LIVE_ELECTRUMX=1 node test/live.js",
-    "start": "node bin/strfry-namecoin-policy.js"
+    "start": "node bin/strfry-namecoin-policy.js",
+    "build:types": "tsc --allowJs --declaration --emitDeclarationOnly --outDir dist src/cache.js src/config.js src/electrumx.js src/index.js src/resolver.js"
   },
-  "dependencies": {}
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
 }
