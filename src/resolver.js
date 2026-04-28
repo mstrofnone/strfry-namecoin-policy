@@ -1,6 +1,7 @@
 'use strict';
 
 const { LRUCache } = require('./cache');
+const { NullMetrics } = require('./metrics');
 
 /**
  * NIP-05 "name@domain.bit" → Namecoin pubkey resolver.
@@ -26,12 +27,16 @@ class NamecoinResolver {
    * @param {import('./electrumx').ElectrumXClient} opts.client
    * @param {number} [opts.cacheTtlMs=300000]
    * @param {number} [opts.cacheMax=2000]
+   * @param {object} [opts.cache]    pre-built cache (LRUCache or PersistentLRU);
+   *                                 when set, cacheTtlMs/cacheMax are ignored
+   * @param {object} [opts.metrics]  metrics instance (Metrics|NullMetrics)
    * @param {(level:string,...args:any[])=>void} [opts.logger]
    */
-  constructor({ client, cacheTtlMs = 300_000, cacheMax = 2000, logger } = {}) {
+  constructor({ client, cacheTtlMs = 300_000, cacheMax = 2000, cache, metrics, logger } = {}) {
     if (!client) throw new Error('NamecoinResolver: client is required');
     this.client = client;
-    this.cache = new LRUCache({ max: cacheMax, ttlMs: cacheTtlMs });
+    this.cache = cache || new LRUCache({ max: cacheMax, ttlMs: cacheTtlMs });
+    this.metrics = metrics || new NullMetrics();
     this.logger = logger || (() => {});
   }
 
@@ -186,8 +191,13 @@ class NamecoinResolver {
     const parsed = NamecoinResolver.parseIdentifier(identifier);
     if (!parsed) return null;
     const key = `${parsed.namecoinName}|${parsed.localPart}`;
+    this.metrics.inc('lookups_total');
     const cached = this.cache.get(key);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) {
+      this.metrics.inc('cache_hits_total');
+      return cached;
+    }
+    this.metrics.inc('cache_misses_total');
 
     let result = null;
     try {

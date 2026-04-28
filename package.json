@@ -41,5 +41,8 @@
     "test:live": "LIVE_ELECTRUMX=1 node test/live.js",
     "start": "node bin/strfry-namecoin-policy.js"
   },
-  "dependencies": {}
+  "dependencies": {},
+  "optionalDependencies": {
+    "better-sqlite3": "^11.0.0"
+  }
 }
