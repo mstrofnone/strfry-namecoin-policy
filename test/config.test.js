@@ -53,3 +53,57 @@ test('loadConfig: parses booleans', () => {
   });
   assert.equal(c.allowNonBit, false);
 });
+
+// ── Hardening: new env vars ──
+test('loadConfig: rate-limiter defaults', () => {
+  const c = loadConfig({ NAMECOIN_ELECTRUMX_HOST: 'x' });
+  assert.equal(c.lookupRps, 5);
+  assert.equal(c.lookupBurst, 10);
+  assert.equal(c.lookupQueueMs, 2000);
+});
+
+test('loadConfig: rate-limiter overrides', () => {
+  const c = loadConfig({
+    NAMECOIN_ELECTRUMX_HOST: 'x',
+    NAMECOIN_POLICY_LOOKUP_RPS: '20',
+    NAMECOIN_POLICY_LOOKUP_BURST: '50',
+    NAMECOIN_POLICY_LOOKUP_QUEUE_MS: '0',
+  });
+  assert.equal(c.lookupRps, 20);
+  assert.equal(c.lookupBurst, 50);
+  assert.equal(c.lookupQueueMs, 0);
+});
+
+test('loadConfig: rejects invalid rate-limiter values', () => {
+  assert.throws(() => loadConfig({
+    NAMECOIN_ELECTRUMX_HOST: 'x',
+    NAMECOIN_POLICY_LOOKUP_RPS: '-1',
+  }), /LOOKUP_RPS/);
+  assert.throws(() => loadConfig({
+    NAMECOIN_ELECTRUMX_HOST: 'x',
+    NAMECOIN_POLICY_LOOKUP_BURST: 'nope',
+  }), /LOOKUP_BURST/);
+  assert.throws(() => loadConfig({
+    NAMECOIN_ELECTRUMX_HOST: 'x',
+    NAMECOIN_POLICY_LOOKUP_QUEUE_MS: '-5',
+  }), /LOOKUP_QUEUE_MS/);
+});
+
+test('loadConfig: softFail defaults to false', () => {
+  const c = loadConfig({ NAMECOIN_ELECTRUMX_HOST: 'x' });
+  assert.equal(c.softFail, false);
+});
+
+test('loadConfig: softFail honors NAMECOIN_POLICY_SOFT_FAIL=true', () => {
+  const c = loadConfig({ NAMECOIN_POLICY_SOFT_FAIL: 'true' });
+  assert.equal(c.softFail, true);
+});
+
+test('loadConfig: insecure surfaces on config object', () => {
+  const c = loadConfig({
+    NAMECOIN_ELECTRUMX_HOST: 'x',
+    NAMECOIN_ELECTRUMX_INSECURE: 'true',
+  });
+  assert.equal(c.insecure, true);
+  assert.equal(c.rejectUnauthorized, false);
+});

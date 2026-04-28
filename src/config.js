@@ -21,14 +21,27 @@ function loadConfig(env = process.env) {
     throw new Error(`NAMECOIN_POLICY_LOG_LEVEL: invalid value "${logLevel}".`);
   }
 
+  /** Disable TLS verification entirely (testing only — emits a banner). */
   const insecure = parseBool(env.NAMECOIN_ELECTRUMX_INSECURE, false);
+  /** Cert pin(s): 64-hex DER fingerprints OR `sha256/<base64>` SPKI pins, comma-separated. */
   const certPinSha256 = env.NAMECOIN_ELECTRUMX_CERT_PIN || null;
+
+  /** Sustained ElectrumX lookup rate (tokens/sec) for the global bucket. */
+  const lookupRps = parsePositiveInt(env.NAMECOIN_POLICY_LOOKUP_RPS, 5, 'NAMECOIN_POLICY_LOOKUP_RPS');
+  /** Max burst (bucket capacity) for ElectrumX lookups. */
+  const lookupBurst = parsePositiveInt(env.NAMECOIN_POLICY_LOOKUP_BURST, 10, 'NAMECOIN_POLICY_LOOKUP_BURST');
+  /** Max time (ms) a single lookup will wait for a token before failing. */
+  const lookupQueueMs = parseNonNegativeInt(env.NAMECOIN_POLICY_LOOKUP_QUEUE_MS, 2000, 'NAMECOIN_POLICY_LOOKUP_QUEUE_MS');
+
+  /** If true, missing NAMECOIN_ELECTRUMX_HOST means "accept everything" (footgun, off by default). */
+  const softFail = parseBool(env.NAMECOIN_POLICY_SOFT_FAIL, false);
 
   return {
     host,
     port,
     tls,
     certPinSha256,
+    insecure,
     // If pinning is set, we verify manually; if INSECURE=1, skip verification entirely.
     // Otherwise use the system trust store.
     rejectUnauthorized: insecure ? false : !certPinSha256,
@@ -38,6 +51,10 @@ function loadConfig(env = process.env) {
     cacheTtlMs: parseInt(env.NAMECOIN_POLICY_CACHE_TTL_MS || '300000', 10),
     logLevel,
     allowNonBit: parseBool(env.NAMECOIN_POLICY_ALLOW_NON_BIT, true),
+    lookupRps,
+    lookupBurst,
+    lookupQueueMs,
+    softFail,
   };
 }
 
@@ -47,6 +64,24 @@ function parseBool(val, dflt) {
   if (['1', 'true', 'yes', 'y', 'on'].includes(v)) return true;
   if (['0', 'false', 'no', 'n', 'off'].includes(v)) return false;
   return dflt;
+}
+
+function parsePositiveInt(val, dflt, name) {
+  if (val == null || val === '') return dflt;
+  const n = Number(val);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new Error(`${name}: must be a positive number, got "${val}"`);
+  }
+  return n;
+}
+
+function parseNonNegativeInt(val, dflt, name) {
+  if (val == null || val === '') return dflt;
+  const n = Number(val);
+  if (!Number.isFinite(n) || n < 0) {
+    throw new Error(`${name}: must be a non-negative number, got "${val}"`);
+  }
+  return n;
 }
 
 function makeLogger(level) {
