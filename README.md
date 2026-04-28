@@ -47,6 +47,85 @@ busy relay doesn't hammer ElectrumX.
 
 [deploy]: https://github.com/namecoin/namecoin.org/pull/749
 
+> **You do _not_ need to run `namecoind` on the relay host.** This plugin
+> talks **only to ElectrumX** over TCP/TLS — it has no Namecoin Core / Bitcoin
+> Core JSON-RPC dependency. See [Deployment topologies](#deployment-topologies)
+> below.
+
+## Deployment topologies
+
+This plugin is a thin ElectrumX client. It does not embed, spawn, or speak
+JSON-RPC to `namecoind`/`bitcoind`. The only thing it needs is a host:port
+that answers the Electrum protocol (1.4) with a Namecoin-aware name index.
+
+That gives you three sensible deployment shapes:
+
+### 1. External public ElectrumX (zero infra)
+
+Point the plugin at a community-run namecoin-ElectrumX server such as
+`electrumx.testls.space:50002`. This is the simplest setup and is what the
+repo's [examples/wrapper.sh](./examples/wrapper.sh) does by default.
+
+```sh
+export NAMECOIN_ELECTRUMX_HOST="electrumx.testls.space"
+export NAMECOIN_ELECTRUMX_PORT="50002"
+export NAMECOIN_ELECTRUMX_TLS="true"
+# Strongly recommended: pin the self-signed cert
+export NAMECOIN_ELECTRUMX_CERT_PIN="<sha256-of-cert-DER>"
+```
+
+Trust model: you trust the operator not to lie about Namecoin name values.
+They can withhold or stale-serve, but they cannot forge consensus.
+
+### 2. Your own ElectrumX (recommended for production relays)
+
+Run [namecoin-electrumx][nx] alongside your own [namecoind][nmc] — usually
+on the same host or LAN as the strfry relay — and point the plugin at
+`localhost:50002`. The plugin still only speaks the Electrum protocol; the
+`namecoind` JSON-RPC link is between *ElectrumX and namecoind*, not between
+this plugin and namecoind.
+
+```
+  ┌──────────────┐  stdio   ┌────────────┐  Electrum 1.4 (TCP/TLS)  ┌───────────┐
+  │   strfry     │ ◀───▶ │ this plug- │ ────────────────────▶ │ ElectrumX │
+  │ write-policy │        │    in      │                          │           │
+  └──────────────┘        └────────────┘                          └─────┬─────┘
+                                                                       │ JSON-RPC
+                                                                       ▼
+                                                              ┌──────────────┐
+                                                              │  namecoind   │
+                                                              │ (full node)  │
+                                                              └──────────────┘
+```
+
+This is the highest-assurance option: nobody else's server is in the
+verification path.
+
+[nx]: https://github.com/namecoin/electrumx
+[nmc]: https://github.com/namecoin/namecoin-core
+
+### 3. Mixed / failover
+
+The plugin opens one short-lived TCP/TLS connection per uncached resolve,
+so swapping the `NAMECOIN_ELECTRUMX_HOST` env var and restarting strfry is
+the entire "failover" procedure. There is no built-in pool of servers; if
+you want HA, run a TCP load balancer (e.g. HAProxy) in front of multiple
+ElectrumX endpoints and point the plugin at the LB.
+
+### What this plugin does **not** do
+
+- ❌ It does **not** open a JSON-RPC connection to `namecoind`. There is no
+  `rpcuser`/`rpcpassword`/`rpcport` config, by design.
+- ❌ It does **not** require `blockchain.name.show` or any Namecoin-specific
+  ElectrumX extension. It uses only the generic Electrum methods
+  (`blockchain.scripthash.get_history`, `blockchain.transaction.get`,
+  `blockchain.headers.subscribe`) plus pure-JS Bitcoin script parsing —
+  same algorithm as Amethyst and Nostur. See [src/electrumx.js](./src/electrumx.js).
+- ❌ It does **not** validate SPV proofs. The trust model is "trust the
+  ElectrumX server not to serve stale/wrong values" — see
+  [Security notes](#security-notes) for mitigations (cert pinning, run your
+  own server).
+
 ## Install
 
 ```bash
