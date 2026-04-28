@@ -176,11 +176,11 @@ Make both files executable and restart strfry. A full example is in
 
 | Variable | Default | Description |
 |---|---|---|
-| `NAMECOIN_ELECTRUMX_HOST` | *(required)* | Hostname of the ElectrumX server. Without it, the plugin soft-fails open and accepts everything. |
+| `NAMECOIN_ELECTRUMX_HOST` | *(required)* | Hostname of the ElectrumX server. **Without it, the plugin fails closed by default** — see `NAMECOIN_POLICY_SOFT_FAIL`. |
 | `NAMECOIN_ELECTRUMX_PORT` | `50002` (TLS) / `50001` (TCP) | TCP port. |
 | `NAMECOIN_ELECTRUMX_TLS` | `true` | Use TLS (`true`/`false`). |
-| `NAMECOIN_ELECTRUMX_CERT_PIN` | — | Pin a self-signed cert by its **SHA-256 of DER** (64 hex chars). When set, the system trust store is bypassed and only this cert is accepted. |
-| `NAMECOIN_ELECTRUMX_INSECURE` | `false` | If `true`, disable TLS verification entirely. **For testing only** — production setups should pin a cert instead. |
+| `NAMECOIN_ELECTRUMX_CERT_PIN` | — | One or more cert pins (comma-separated for rotation). Each pin is either a 64-hex SHA-256 of the DER cert, or `sha256/<base64>` for a SubjectPublicKeyInfo pin. When set, the system trust store is bypassed and only matching certs are accepted. |
+| `NAMECOIN_ELECTRUMX_INSECURE` | `false` | If `true`, disable TLS verification entirely. **For testing only** — production setups should pin a cert instead. Triggers a loud startup banner. |
 | `NAMECOIN_ELECTRUMX_TIMEOUT_MS` | `5000` | Per-query timeout. |
 | `NAMECOIN_ELECTRUMX_RETRIES` | `2` | Retry attempts per lookup on connect/parse/IO failure. |
 | `NAMECOIN_POLICY_MODE` | `kind0-only` | `kind0-only`: verify only kind:0 with `.bit` NIP-05. `all-kinds-require-bit`: reject all events from authors that haven't been verified yet. |
@@ -189,6 +189,27 @@ Make both files executable and restart strfry. A full example is in
 | `NAMECOIN_POLICY_ALLOW_NON_BIT` | `true` | If `false`, kind:0 events with non-`.bit` NIP-05 identifiers are rejected. |
 | `NAMECOIN_POLICY_MIN_CONFIRMATIONS` | `1` | Minimum confirmations a Namecoin name-update tx must have before it's trusted. `0` allows mempool/unconfirmed tx (testing only). Higher values harden against reorgs and malicious-server fabrication at the cost of slightly slower propagation. |
 | `NAMECOIN_POLICY_NEG_CACHE_TTL_MS` | `30000` | Short TTL for *parse-failure* negatives (malformed JSON, missing `nostr` key, ElectrumX returned null). Successful negatives — e.g. `bob@x.bit` looking up a record that lists only `_` and `alice` — still use the long `NAMECOIN_POLICY_CACHE_TTL_MS`. |
+| `NAMECOIN_POLICY_LOOKUP_RPS` | `5` | Sustained ElectrumX lookup rate (tokens/sec). Cache hits don't count. |
+| `NAMECOIN_POLICY_LOOKUP_BURST` | `10` | Max burst size for ElectrumX lookups. |
+| `NAMECOIN_POLICY_LOOKUP_QUEUE_MS` | `2000` | Max time (ms) a single lookup will wait for a token before returning a `rate-limited:` reject. |
+| `NAMECOIN_POLICY_SOFT_FAIL` | `false` | If `true` and `NAMECOIN_ELECTRUMX_HOST` is unset, accept all events without verification (legacy behavior). Default fails closed. |
+
+### Cert pin formats
+
+`NAMECOIN_ELECTRUMX_CERT_PIN` accepts two pin shapes, and any number of
+them comma-separated (any-match):
+
+- **DER fingerprint** — `sha256(DER(cert))` as 64 hex chars. Simple and
+  matches what `openssl x509 -outform der | sha256sum` prints, but breaks
+  when the cert rotates even if the underlying key is reused.
+- **SPKI pin** — `sha256/<base64-of-sha256(SubjectPublicKeyInfo)>`. Survives
+  cert rotation as long as the operator keeps the same keypair, which is
+  the right default for long-lived self-signed ElectrumX servers. Compute
+  with: `openssl s_client -connect host:50002 </dev/null 2>/dev/null |
+  openssl x509 -pubkey -noout | openssl pkey -pubin -outform der |
+  openssl dgst -sha256 -binary | base64`. Configure as e.g.
+  `NAMECOIN_ELECTRUMX_CERT_PIN="sha256/AAAA...=,sha256/BBBB...="` to allow
+  a current and a next-rotation key simultaneously.
 
 ## Supported identifier forms
 

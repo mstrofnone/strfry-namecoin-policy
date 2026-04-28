@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const {
+  ElectrumXClient,
   buildNameIndexScript,
   electrumScriptHash,
   parseNameScript,
@@ -11,8 +12,10 @@ const {
   pushData,
   selectNameRowFromHistory,
   NAME_EXPIRE_DEPTH,
+  parseCertPins,
   OP_NAME_UPDATE,
   OP_NAME_FIRSTUPDATE,
+  NAMECOIN_NAME_MAX_BYTES,
 } = require('../src/electrumx');
 
 // Build a tx with a single NAME_UPDATE vout for the given name+value.
@@ -201,6 +204,64 @@ test('parseNameFromTx: returns null if no vout matches the name', () => {
     ],
   };
   assert.equal(parseNameFromTx(tx, 'd/me'), null);
+});
+
+// ── Hardening: SPKI / DER cert pin parsing ──
+
+test('parseCertPins: legacy 64-hex DER fingerprint', () => {
+  const hex = 'a'.repeat(64);
+  assert.deepEqual(parseCertPins(hex), [{ kind: 'der', hex }]);
+});
+
+test('parseCertPins: SPKI base64 form', () => {
+  // 32-byte zero buffer encodes to 'AAAA...' base64 of length 44 (with padding).
+  const b64 = Buffer.alloc(32).toString('base64');
+  const pins = parseCertPins(`sha256/${b64}`);
+  assert.equal(pins.length, 1);
+  assert.equal(pins[0].kind, 'spki');
+  assert.equal(pins[0].b64, b64);
+});
+
+test('parseCertPins: comma-separated mixed pins', () => {
+  const hex = 'b'.repeat(64);
+  const b64 = Buffer.alloc(32, 1).toString('base64');
+  const pins = parseCertPins(`${hex}, sha256/${b64}`);
+  assert.equal(pins.length, 2);
+  assert.equal(pins[0].kind, 'der');
+  assert.equal(pins[0].hex, hex);
+  assert.equal(pins[1].kind, 'spki');
+  assert.equal(pins[1].b64, b64);
+});
+
+test('parseCertPins: rejects malformed entries', () => {
+  assert.throws(() => parseCertPins('not-hex-not-spki'), /CERT_PIN/);
+  assert.throws(() => parseCertPins('sha256/'), /CERT_PIN/);
+  assert.throws(() => parseCertPins('sha256/' + Buffer.alloc(8).toString('base64')), /32 bytes/);
+  assert.throws(() => parseCertPins('aa'), /64 hex chars/);
+});
+
+test('parseCertPins: empty / null returns empty list', () => {
+  assert.deepEqual(parseCertPins(null), []);
+  assert.deepEqual(parseCertPins(''), []);
+  assert.deepEqual(parseCertPins('  ,  ,'), []);
+});
+
+// ── Hardening: nameShow rejects oversize names without opening a socket ──
+
+test('ElectrumXClient.nameShow: rejects empty name', async () => {
+  const c = new ElectrumXClient({ host: 'unused.invalid', tls: false, retries: 0, timeoutMs: 100 });
+  await assert.rejects(c.nameShow(''), /outside \[1, 255\]/);
+});
+
+test('ElectrumXClient.nameShow: rejects names longer than 255 bytes', async () => {
+  const c = new ElectrumXClient({ host: 'unused.invalid', tls: false, retries: 0, timeoutMs: 100 });
+  const big = 'd/' + 'a'.repeat(NAMECOIN_NAME_MAX_BYTES); // 257 bytes
+  await assert.rejects(c.nameShow(big), /outside \[1, 255\]/);
+});
+
+test('ElectrumXClient.nameShow: rejects non-string', async () => {
+  const c = new ElectrumXClient({ host: 'unused.invalid', tls: false, retries: 0, timeoutMs: 100 });
+  await assert.rejects(c.nameShow(null), /must be a string/);
 });
 
 test('parseNameFromTx: returns null if name mismatches', () => {

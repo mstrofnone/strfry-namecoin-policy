@@ -2,6 +2,15 @@
 
 const { LRUCache } = require('./cache');
 
+// Bound on the post-namespace stem (the bit between `d/`/`id/` and end).
+// Namecoin doesn't enforce this exact value at consensus, but in practice
+// `.bit` names are short. 64 chars is more than enough for any real name
+// and keeps adversarial input out of the ElectrumX call path.
+const MAX_STEM_LEN = 64;
+// Hard cap on full namecoin name length we will hand to nameShow().
+// `id/` + 64 = 67. `d/` + 64 = 66. Use 67 as the upper bound.
+const MAX_NAMECOIN_NAME_BYTES = 67;
+
 /**
  * NIP-05 "name@domain.bit" → Namecoin pubkey resolver.
  *
@@ -29,13 +38,18 @@ class NamecoinResolver {
    * @param {number} [opts.cacheMax=2000]
    * @param {(level:string,...args:any[])=>void} [opts.logger]
    */
-  constructor({ client, cacheTtlMs = 300_000, negCacheTtlMs = 30_000, cacheMax = 2000, logger } = {}) {
+  constructor({ client, cacheTtlMs = 300_000, negCacheTtlMs = 30_000, cacheMax = 2000, logger, rateLimiter } = {}) {
     if (!client) throw new Error('NamecoinResolver: client is required');
     this.client = client;
     this.cache = new LRUCache({ max: cacheMax, ttlMs: cacheTtlMs });
     this.cacheTtlMs = cacheTtlMs;
     this.negCacheTtlMs = negCacheTtlMs;
     this.logger = logger || (() => {});
+    // Optional global ElectrumX lookup limiter. Cache hits MUST NOT count
+    // against the budget, so this only fires on a true cache miss path.
+    this.rateLimiter = rateLimiter || null;
+    /** Set to true when the most recent resolve() was throttled out. */
+    this.lastWasRateLimited = false;
   }
 
   /**
@@ -50,9 +64,20 @@ class NamecoinResolver {
     const id = identifier.trim().toLowerCase();
     if (!id) return null;
 
+    const finalize = (parsed) => {
+      if (!parsed) return null;
+      // Reject overlong names to keep adversarial input out of the
+      // ElectrumX call path. Stem bound is post-namespace; full bound
+      // is on the encoded namecoinName.
+      const stem = parsed.namecoinName.replace(/^(d|id)\//, '');
+      if (stem.length === 0 || stem.length > MAX_STEM_LEN) return null;
+      if (Buffer.byteLength(parsed.namecoinName, 'utf8') > MAX_NAMECOIN_NAME_BYTES) return null;
+      return parsed;
+    };
+
     // d/<name> or id/<name>  (direct namespace form)
     if (/^(d|id)\/[^/\s@]+$/.test(id)) {
-      return { namecoinName: id, localPart: '_' };
+      return finalize({ namecoinName: id, localPart: '_' });
     }
 
     // user@domain.bit  or  user@d/name
@@ -64,10 +89,10 @@ class NamecoinResolver {
       if (domain.endsWith('.bit')) {
         const stem = domain.slice(0, -4);
         if (!stem || stem.includes('/') || stem.includes('.')) return null;
-        return { namecoinName: `d/${stem}`, localPart: local };
+        return finalize({ namecoinName: `d/${stem}`, localPart: local });
       }
       if (/^(d|id)\/[^/\s]+$/.test(domain)) {
-        return { namecoinName: domain, localPart: local };
+        return finalize({ namecoinName: domain, localPart: local });
       }
       return null;
     }
@@ -76,7 +101,7 @@ class NamecoinResolver {
     if (id.endsWith('.bit')) {
       const stem = id.slice(0, -4);
       if (!stem || stem.includes('/') || stem.includes('.')) return null;
-      return { namecoinName: `d/${stem}`, localPart: '_' };
+      return finalize({ namecoinName: `d/${stem}`, localPart: '_' });
     }
 
     return null;
@@ -186,11 +211,23 @@ class NamecoinResolver {
    * Results (including negatives) are cached with the configured TTL.
    */
   async resolve(identifier) {
+    this.lastWasRateLimited = false;
     const parsed = NamecoinResolver.parseIdentifier(identifier);
     if (!parsed) return null;
     const key = `${parsed.namecoinName}|${parsed.localPart}`;
     const cached = this.cache.get(key);
     if (cached !== undefined) return cached;
+
+    // Cache miss: this will hit ElectrumX, so it counts against the budget.
+    if (this.rateLimiter) {
+      const ok = await this.rateLimiter.acquire();
+      if (!ok) {
+        this.lastWasRateLimited = true;
+        this.logger('info', `namecoin resolve rate-limited for ${identifier}`);
+        // Don't cache — this is a transient overload signal.
+        return null;
+      }
+    }
 
     let result = null;
     let row = null;

@@ -27,7 +27,24 @@ const readline = require('readline');
 const { ElectrumXClient } = require('./electrumx');
 const { NamecoinResolver } = require('./resolver');
 const { LRUCache } = require('./cache');
+const { TokenBucket } = require('./ratelimit');
 const { loadConfig, makeLogger } = require('./config');
+
+function emitInsecureBanner() {
+  const bar = '='.repeat(64);
+  console.error(bar);
+  console.error('WARNING: NAMECOIN_ELECTRUMX_INSECURE=true — TLS verification DISABLED.');
+  console.error('Your ElectrumX traffic is vulnerable to MITM. Use NAMECOIN_ELECTRUMX_CERT_PIN instead.');
+  console.error(bar);
+}
+
+function emitNoHostBanner({ softFail }) {
+  if (softFail) {
+    console.error('[strfry-namecoin-policy] WARN: NAMECOIN_ELECTRUMX_HOST not set and NAMECOIN_POLICY_SOFT_FAIL=true — accepting all events without verification (INSECURE).');
+  } else {
+    console.error('[strfry-namecoin-policy] WARN: NAMECOIN_ELECTRUMX_HOST not set — rejecting all .bit lookups (set NAMECOIN_POLICY_SOFT_FAIL=true to bypass)');
+  }
+}
 
 /**
  * Construct and run the plugin using process.stdin/stdout.
@@ -44,9 +61,8 @@ async function run({ env = process.env, stdin = process.stdin, stdout = process.
   }
   const logger = makeLogger(config.logLevel);
 
-  if (!config.host) {
-    logger('info', 'NAMECOIN_ELECTRUMX_HOST not set — plugin will accept all events without verification.');
-  }
+  if (config.insecure) emitInsecureBanner();
+  if (!config.host) emitNoHostBanner({ softFail: config.softFail });
 
   const client = config.host ? new ElectrumXClient({
     host: config.host,
@@ -60,11 +76,18 @@ async function run({ env = process.env, stdin = process.stdin, stdout = process.
     logger,
   }) : null;
 
+  const rateLimiter = client ? new TokenBucket({
+    rps: config.lookupRps,
+    burst: config.lookupBurst,
+    queueMs: config.lookupQueueMs,
+  }) : null;
+
   const resolver = client ? new NamecoinResolver({
     client,
     cacheTtlMs: config.cacheTtlMs,
     negCacheTtlMs: config.negCacheTtlMs,
     logger,
+    rateLimiter,
   }) : null;
 
   // Cache of pubkey -> true, for authors we've seen verified via a .bit kind:0
@@ -162,13 +185,23 @@ function makeHandler({ config, resolver, verifiedAuthors, logger }) {
       }
 
       if (!resolver) {
-        // No resolver configured — treat as soft-fail.
-        logger('info', `kind0 ${id} has .bit NIP-05 but no ElectrumX configured — accept`);
-        return { id, action: 'accept' };
+        // No ElectrumX configured. Default = fail closed (reject .bit
+        // lookups we can't verify). Setting NAMECOIN_POLICY_SOFT_FAIL=true
+        // restores the legacy accept-everything behavior.
+        if (config.softFail) {
+          logger('info', `kind0 ${id} has .bit NIP-05 but no ElectrumX configured — accept (SOFT_FAIL)`);
+          return { id, action: 'accept' };
+        }
+        return { id, action: 'reject',
+          msg: 'blocked: Namecoin .bit NIP-05 verification unavailable (no ElectrumX configured)' };
       }
 
       const resolved = await resolver.resolve(lowered);
       if (!resolved) {
+        if (resolver.lastWasRateLimited) {
+          return { id, action: 'reject',
+            msg: 'rate-limited: too many .bit lookups in flight, try again' };
+        }
         return { id, action: 'reject',
           msg: `invalid: Namecoin NIP-05 "${nip05}" could not be resolved (name missing, expired, or malformed)` };
       }

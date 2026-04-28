@@ -49,6 +49,7 @@ const NAME_EXPIRE_DEPTH = 36_000;  // Namecoin names expire after ~36k blocks (~
 const MAX_HISTORY_WALK = 32;       // cap newest→oldest scan to bound work on adversarial histories
 const TIP_CACHE_TTL_MS = 60_000;   // 60s in-process cache for chain tip
 const VERSION_HANDSHAKE_TIMEOUT_MS = 2000; // dedicated short timeout for server.version
+const NAMECOIN_NAME_MAX_BYTES = 255;  // Namecoin consensus cap on name length
 
 // Module-level chain-tip cache. Stale-by-60s is safe because expiry math
 // has a 36000-block grace window.
@@ -57,6 +58,43 @@ let cachedTipAt = 0;
 
 /** Test-only: reset the module-level tip cache. */
 function _resetTipCacheForTests() { cachedTip = null; cachedTipAt = 0; }
+
+/**
+ * Parse the NAMECOIN_ELECTRUMX_CERT_PIN env value into a list of pin
+ * descriptors. Accepts:
+ *   - Plain 64-hex string  → DER fingerprint of the peer cert.
+ *   - `sha256/<base64>`    → SHA-256 of the peer's SubjectPublicKeyInfo (SPKI).
+ *   - Comma-separated list of either form (any-match).
+ *
+ * @param {string|null|undefined} raw
+ * @returns {Array<{kind:'der',hex:string} | {kind:'spki',b64:string}>}
+ */
+function parseCertPins(raw) {
+  if (!raw) return [];
+  const out = [];
+  for (const part of String(raw).split(',')) {
+    const p = part.trim();
+    if (!p) continue;
+    if (/^sha256\//i.test(p)) {
+      const b64 = p.slice(p.indexOf('/') + 1).trim();
+      if (!b64) throw new Error(`NAMECOIN_ELECTRUMX_CERT_PIN: empty SPKI pin in "${p}"`);
+      // Tolerate both standard and url-safe base64. Validate by decoding.
+      const buf = Buffer.from(b64, 'base64');
+      if (buf.length !== 32) {
+        throw new Error(`NAMECOIN_ELECTRUMX_CERT_PIN: SPKI pin "${p}" must decode to 32 bytes (got ${buf.length})`);
+      }
+      out.push({ kind: 'spki', b64: buf.toString('base64') });
+    } else {
+      const hex = p.toLowerCase().replace(/[^0-9a-f]/g, '');
+      if (hex.length !== 64) {
+        throw new Error(`NAMECOIN_ELECTRUMX_CERT_PIN: hex DER pin "${p}" must be 64 hex chars (got ${hex.length})`);
+      }
+      out.push({ kind: 'der', hex });
+    }
+  }
+  return out;
+}
+
 
 class ElectrumXClient extends EventEmitter {
   /**
@@ -77,10 +115,17 @@ class ElectrumXClient extends EventEmitter {
     this.host = opts.host;
     this.useTls = opts.tls !== false;
     this.port = Number(opts.port) || (this.useTls ? 50002 : 50001);
-    this.certPinSha256 = opts.certPinSha256
-      ? String(opts.certPinSha256).toLowerCase().replace(/[^0-9a-f]/g, '')
-      : null;
-    this.rejectUnauthorized = opts.rejectUnauthorized ?? !this.certPinSha256;
+    // Accept either:
+    //   - 64-hex DER fingerprint (legacy);
+    //   - `sha256/<base64>` SPKI pin (survives cert rotation);
+    //   - comma-separated mix of both (any match wins, for rotation).
+    this.certPins = parseCertPins(opts.certPinSha256);
+    // Back-compat: keep certPinSha256 set when there's exactly one DER pin
+    // so downstream callers can still read it as a flag.
+    this.certPinSha256 = (this.certPins.length === 1 && this.certPins[0].kind === 'der')
+      ? this.certPins[0].hex
+      : (this.certPins.length > 0 ? '__pinned__' : null);
+    this.rejectUnauthorized = opts.rejectUnauthorized ?? !(this.certPins.length > 0);
     this.timeoutMs = Number(opts.timeoutMs) || 5000;
     this.retries = Number.isFinite(opts.retries) ? opts.retries : 2;
     this.minConfirmations = Number.isFinite(opts.minConfirmations)
@@ -96,6 +141,19 @@ class ElectrumXClient extends EventEmitter {
    * @returns {Promise<{name:string,value:string,txid:string,height:number,expires_in?:number,tip?:number}|null>}
    */
   async nameShow(name) {
+    if (typeof name !== 'string') {
+      const err = new Error('ElectrumX nameShow: name must be a string');
+      err.electrumxDefinitive = true;
+      throw err;
+    }
+    // Namecoin consensus caps name length at 255 bytes; refuse longer names
+    // before constructing a script (which would overflow OP_PUSHDATA1's len byte).
+    const nameBytes = Buffer.byteLength(name, 'utf8');
+    if (nameBytes === 0 || nameBytes > NAMECOIN_NAME_MAX_BYTES) {
+      const err = new Error(`ElectrumX nameShow: name length ${nameBytes} bytes outside [1, ${NAMECOIN_NAME_MAX_BYTES}]`);
+      err.electrumxDefinitive = true;
+      throw err;
+    }
     let lastErr = null;
     for (let attempt = 0; attempt <= this.retries; attempt++) {
       try {
@@ -146,17 +204,24 @@ class ElectrumXClient extends EventEmitter {
       });
 
       const onConnect = async () => {
-        if (this.useTls && this.certPinSha256) {
+        if (this.useTls && this.certPins.length > 0) {
           try {
             const peerCert = socket.getPeerCertificate(true);
             if (!peerCert || !peerCert.raw) {
               return finish(new Error('No peer certificate available to verify pin'));
             }
-            const fp = crypto.createHash('sha256').update(peerCert.raw).digest('hex');
-            if (fp !== this.certPinSha256) {
-              return finish(new Error(
-                `Cert pin mismatch: expected ${this.certPinSha256} got ${fp}`
-              ));
+            const derFp = crypto.createHash('sha256').update(peerCert.raw).digest('hex');
+            const spkiB64 = peerCert.pubkey
+              ? crypto.createHash('sha256').update(peerCert.pubkey).digest('base64')
+              : null;
+            const matched = this.certPins.some((pin) => {
+              if (pin.kind === 'der') return pin.hex === derFp;
+              if (pin.kind === 'spki') return spkiB64 != null && pin.b64 === spkiB64;
+              return false;
+            });
+            if (!matched) {
+              const observed = `der=${derFp}` + (spkiB64 ? ` spki=sha256/${spkiB64}` : '');
+              return finish(new Error(`Cert pin mismatch: no configured pin matched (observed ${observed})`));
             }
           } catch (e) {
             return finish(new Error(`Cert pin verification failed: ${e.message}`));
@@ -585,6 +650,7 @@ module.exports = {
   parseNameFromTx,
   pushData,
   readPushData,
+  parseCertPins,
   OP_NAME_UPDATE,
   OP_NAME_FIRSTUPDATE,
   NAME_EXPIRE_DEPTH,
@@ -592,4 +658,5 @@ module.exports = {
   TIP_CACHE_TTL_MS,
   selectNameRowFromHistory,
   _resetTipCacheForTests,
+  NAMECOIN_NAME_MAX_BYTES,
 };
