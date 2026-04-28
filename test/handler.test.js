@@ -220,3 +220,29 @@ test('handler: echoes event id on responses', async () => {
   const res = await handle(newEvent({ id: 'f'.repeat(64), kind: 1, content: '' }));
   assert.equal(res.id, 'f'.repeat(64));
 });
+
+// ── Fix #8: extractNip05 must reject array JSON ───────────────────────────
+
+const { extractNip05 } = require('../src/index');
+
+test('extractNip05: returns null for array JSON content', () => {
+  // An attacker submits content = '["alice@x.bit"]'. typeof [] === 'object'
+  // so the old guard let arrays through; doc.nip05 was undefined, so this
+  // happened to fall through harmlessly today, but the structural guard
+  // is the right place to enforce it.
+  assert.equal(extractNip05('["alice@x.bit"]'), null);
+  assert.equal(extractNip05('[]'), null);
+  assert.equal(extractNip05('[{"nip05": "alice@x.bit"}]'), null);
+});
+
+test('extractNip05: still works on a normal object', () => {
+  assert.equal(extractNip05('{"nip05": "alice@x.bit"}'), 'alice@x.bit');
+  assert.equal(extractNip05('{"nip05": "  bob@y.bit  "}'), 'bob@y.bit');
+});
+
+test('extractNip05: rejects non-string content', () => {
+  assert.equal(extractNip05(null), null);
+  assert.equal(extractNip05(''), null);
+  assert.equal(extractNip05('not json'), null);
+  assert.equal(extractNip05('{"nip05": 42}'), null);
+});

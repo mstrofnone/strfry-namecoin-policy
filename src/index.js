@@ -56,12 +56,14 @@ async function run({ env = process.env, stdin = process.stdin, stdout = process.
     rejectUnauthorized: config.rejectUnauthorized,
     timeoutMs: config.timeoutMs,
     retries:   config.retries,
+    minConfirmations: config.minConfirmations,
     logger,
   }) : null;
 
   const resolver = client ? new NamecoinResolver({
     client,
     cacheTtlMs: config.cacheTtlMs,
+    negCacheTtlMs: config.negCacheTtlMs,
     logger,
   }) : null;
 
@@ -202,6 +204,9 @@ function extractNip05(content) {
   let doc;
   try { doc = JSON.parse(content); } catch (_) { return null; }
   if (!doc || typeof doc !== 'object') return null;
+  // typeof [] === 'object' — reject arrays so a kind:0 with content
+  // = '["alice@x.bit"]' can't sneak through.
+  if (Array.isArray(doc)) return null;
   const nip05 = doc.nip05;
   if (typeof nip05 !== 'string') return null;
   const trimmed = nip05.trim();
