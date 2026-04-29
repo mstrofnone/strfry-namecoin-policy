@@ -43,7 +43,7 @@
     "test": "node --test test/*.test.js",
     "test:live": "LIVE_ELECTRUMX=1 node test/live.js",
     "start": "node bin/strfry-namecoin-policy.js",
-    "build:types": "tsc --allowJs --declaration --emitDeclarationOnly --outDir dist src/cache.js src/config.js src/electrumx.js src/index.js src/resolver.js"
+    "build:types": "tsc --allowJs --declaration --emitDeclarationOnly --outDir dist src/*.js"
   },
   "dependencies": {},
   "optionalDependencies": {

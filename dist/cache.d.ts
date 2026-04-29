@@ -7,8 +7,8 @@
  */
 export class LRUCache {
     constructor({ max, ttlMs }?: {
-        max?: number | undefined;
-        ttlMs?: number | undefined;
+        max?: number;
+        ttlMs?: number;
     });
     max: number;
     ttlMs: number;
@@ -21,7 +21,7 @@ export class LRUCache {
     get(key: any): any;
     has(key: any): boolean;
     set(key: any, value: any, { ttlMs }?: {}): any;
-    delete(key: any): boolean;
+    delete(key: any): any;
     clear(): void;
-    get size(): number;
+    get size(): any;
 }

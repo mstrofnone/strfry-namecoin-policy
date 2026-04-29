@@ -31,19 +31,32 @@ export class NamecoinResolver {
     /**
      * @param {object} opts
      * @param {import('./electrumx').ElectrumXClient} opts.client
-     * @param {number} [opts.cacheTtlMs=300000]
+     * @param {number} [opts.cacheTtlMs=300000]   long TTL for successful or fully-resolved-negative results
+     * @param {number} [opts.negCacheTtlMs=30000] short TTL for parse-failure / transient negatives
      * @param {number} [opts.cacheMax=2000]
+     * @param {object} [opts.cache]    pre-built cache (LRUCache or PersistentLRU);
+     *                                 when set, cacheTtlMs/cacheMax are ignored
+     * @param {object} [opts.metrics]  metrics instance (Metrics|NullMetrics)
      * @param {(level:string,...args:any[])=>void} [opts.logger]
      */
-    constructor({ client, cacheTtlMs, cacheMax, logger }?: {
+    constructor({ client, cacheTtlMs, negCacheTtlMs, cacheMax, cache, metrics, logger, rateLimiter }?: {
         client: import("./electrumx").ElectrumXClient;
-        cacheTtlMs?: number | undefined;
-        cacheMax?: number | undefined;
-        logger?: ((level: string, ...args: any[]) => void) | undefined;
+        cacheTtlMs?: number;
+        negCacheTtlMs?: number;
+        cacheMax?: number;
+        cache?: object;
+        metrics?: object;
+        logger?: (level: string, ...args: any[]) => void;
     });
     client: import("./electrumx").ElectrumXClient;
-    cache: LRUCache;
+    cache: any;
+    cacheTtlMs: number;
+    negCacheTtlMs: number;
+    metrics: any;
     logger: (level: string, ...args: any[]) => void;
+    rateLimiter: any;
+    /** Set to true when the most recent resolve() was throttled out. */
+    lastWasRateLimited: boolean;
     /**
      * Resolve a NIP-05-style Namecoin identifier to a pubkey + relay hints.
      * Returns null on not-found / wrong shape / invalid value.
@@ -52,4 +65,3 @@ export class NamecoinResolver {
      */
     resolve(identifier: any): Promise<any>;
 }
-import { LRUCache } from "./cache";
