@@ -176,17 +176,89 @@ Make both files executable and restart strfry. A full example is in
 
 | Variable | Default | Description |
 |---|---|---|
-| `NAMECOIN_ELECTRUMX_HOST` | *(required)* | Hostname of the ElectrumX server. Without it, the plugin soft-fails open and accepts everything. |
+| `NAMECOIN_ELECTRUMX_HOST` | *(required)* | Hostname of the ElectrumX server. **Without it, the plugin fails closed by default** — see `NAMECOIN_POLICY_SOFT_FAIL`. |
 | `NAMECOIN_ELECTRUMX_PORT` | `50002` (TLS) / `50001` (TCP) | TCP port. |
 | `NAMECOIN_ELECTRUMX_TLS` | `true` | Use TLS (`true`/`false`). |
-| `NAMECOIN_ELECTRUMX_CERT_PIN` | — | Pin a self-signed cert by its **SHA-256 of DER** (64 hex chars). When set, the system trust store is bypassed and only this cert is accepted. |
-| `NAMECOIN_ELECTRUMX_INSECURE` | `false` | If `true`, disable TLS verification entirely. **For testing only** — production setups should pin a cert instead. |
+| `NAMECOIN_ELECTRUMX_CERT_PIN` | — | One or more cert pins (comma-separated for rotation). Each pin is either a 64-hex SHA-256 of the DER cert, or `sha256/<base64>` for a SubjectPublicKeyInfo pin. When set, the system trust store is bypassed and only matching certs are accepted. |
+| `NAMECOIN_ELECTRUMX_INSECURE` | `false` | If `true`, disable TLS verification entirely. **For testing only** — production setups should pin a cert instead. Triggers a loud startup banner. |
 | `NAMECOIN_ELECTRUMX_TIMEOUT_MS` | `5000` | Per-query timeout. |
 | `NAMECOIN_ELECTRUMX_RETRIES` | `2` | Retry attempts per lookup on connect/parse/IO failure. |
 | `NAMECOIN_POLICY_MODE` | `kind0-only` | `kind0-only`: verify only kind:0 with `.bit` NIP-05. `all-kinds-require-bit`: reject all events from authors that haven't been verified yet. |
 | `NAMECOIN_POLICY_CACHE_TTL_MS` | `300000` | TTL for resolver cache (ms). |
 | `NAMECOIN_POLICY_LOG_LEVEL` | `info` | `silent` / `info` / `debug`. Logs go to stderr and are captured by strfry. |
 | `NAMECOIN_POLICY_ALLOW_NON_BIT` | `true` | If `false`, kind:0 events with non-`.bit` NIP-05 identifiers are rejected. |
+| `NAMECOIN_POLICY_MIN_CONFIRMATIONS` | `1` | Minimum confirmations a Namecoin name-update tx must have before it's trusted. `0` allows mempool/unconfirmed tx (testing only). Higher values harden against reorgs and malicious-server fabrication at the cost of slightly slower propagation. |
+| `NAMECOIN_POLICY_NEG_CACHE_TTL_MS` | `30000` | Short TTL for *parse-failure* negatives (malformed JSON, missing `nostr` key, ElectrumX returned null). Successful negatives — e.g. `bob@x.bit` looking up a record that lists only `_` and `alice` — still use the long `NAMECOIN_POLICY_CACHE_TTL_MS`. |
+| `NAMECOIN_POLICY_LOOKUP_RPS` | `5` | Sustained ElectrumX lookup rate (tokens/sec). Cache hits don't count. |
+| `NAMECOIN_POLICY_LOOKUP_BURST` | `10` | Max burst size for ElectrumX lookups. |
+| `NAMECOIN_POLICY_LOOKUP_QUEUE_MS` | `2000` | Max time (ms) a single lookup will wait for a token before returning a `rate-limited:` reject. |
+| `NAMECOIN_POLICY_SOFT_FAIL` | `false` | If `true` and `NAMECOIN_ELECTRUMX_HOST` is unset, accept all events without verification (legacy behavior). Default fails closed. |
+
+### Cert pin formats
+
+`NAMECOIN_ELECTRUMX_CERT_PIN` accepts two pin shapes, and any number of
+them comma-separated (any-match):
+
+- **DER fingerprint** — `sha256(DER(cert))` as 64 hex chars. Simple and
+  matches what `openssl x509 -outform der | sha256sum` prints, but breaks
+  when the cert rotates even if the underlying key is reused.
+- **SPKI pin** — `sha256/<base64-of-sha256(SubjectPublicKeyInfo)>`. Survives
+  cert rotation as long as the operator keeps the same keypair, which is
+  the right default for long-lived self-signed ElectrumX servers. Compute
+  with: `openssl s_client -connect host:50002 </dev/null 2>/dev/null |
+  openssl x509 -pubkey -noout | openssl pkey -pubin -outform der |
+  openssl dgst -sha256 -binary | base64`. Configure as e.g.
+  `NAMECOIN_ELECTRUMX_CERT_PIN="sha256/AAAA...=,sha256/BBBB...="` to allow
+  a current and a next-rotation key simultaneously.
+| `NAMECOIN_ELECTRUMX_HOSTS` | — | Comma-separated `host:port[,host:port,…]` list. Overrides `*_HOST/*_PORT` when set. Round-robin with per-host circuit breaker (30s open, exp backoff to 5min). See [Operational](#operational). |
+| `NAMECOIN_ELECTRUMX_SOCKS5` | — | `host:port` of a no-auth SOCKS5 proxy (e.g. `127.0.0.1:9050` for Tor). DNS is delegated to the proxy. |
+| `NAMECOIN_POLICY_CACHE_PATH` | — | If set, both the resolver cache and verified-author set persist to this file. Uses `better-sqlite3` (optional dep) when available, falls back to a JSONL append-log otherwise. |
+| `NAMECOIN_POLICY_METRICS_PORT` | `0` | If non-zero, expose Prometheus metrics on `127.0.0.1:<port>/metrics`. Always bound to localhost. |
+| `NAMECOIN_POLICY_POOL_KEEPALIVE_MS` | `30000` | Idle timeout for the warm ElectrumX connection pool. Set to `0` to use one-connection-per-resolve mode. |
+
+## Operational
+
+For higher-traffic relays, the plugin supports several operational
+features that you can opt into via environment variables. All are
+off-by-default — the legacy single-host, per-resolve-connection,
+in-memory-cache behavior is preserved when these are unset.
+
+| Feature | Env var(s) | Example |
+|---|---|---|
+| Persistent cache | `NAMECOIN_POLICY_CACHE_PATH` | `NAMECOIN_POLICY_CACHE_PATH=/var/cache/strfry-namecoin/cache.db` |
+| Prometheus metrics | `NAMECOIN_POLICY_METRICS_PORT` | `NAMECOIN_POLICY_METRICS_PORT=9091` (curl `http://127.0.0.1:9091/metrics`) |
+| SOCKS5 / Tor | `NAMECOIN_ELECTRUMX_SOCKS5` | `NAMECOIN_ELECTRUMX_SOCKS5=127.0.0.1:9050` |
+| Connection pool | `NAMECOIN_POLICY_POOL_KEEPALIVE_MS` | `NAMECOIN_POLICY_POOL_KEEPALIVE_MS=60000` (`0` = disable) |
+| Multi-ElectrumX + circuit breaker | `NAMECOIN_ELECTRUMX_HOSTS` | `NAMECOIN_ELECTRUMX_HOSTS=ex1.example:50002,ex2.example:50002` |
+| Happy-eyeballs IPv6/IPv4 | *(automatic)* | When the host has both A and AAAA records, both are tried with a 250 ms stagger; the first connect wins. Skipped when SOCKS5 is enabled (proxy resolves names). |
+
+Metrics exported (Prometheus textfile format):
+
+- Counters: `lookups_total`, `cache_hits_total`, `cache_misses_total`,
+  `acceptances_total`, `rejections_total{reason="…"}`,
+  `electrumx_errors_total{type="timeout|socket|tls|cert-pin|parse|closed|socks5|dns|refused|unreachable|other"}`
+- Histogram: `lookup_duration_ms` with buckets
+  `[10, 50, 100, 250, 500, 1000, 2500, 5000, +Inf]`
+
+The metrics listener binds to `127.0.0.1` only — expose it externally
+via an explicit reverse proxy if you need remote scraping.
+
+The persistent cache splits into two sqlite namespaces in one file
+(`resolver` for name lookups, `verifiedAuthors` for the
+`all-kinds-require-bit` mode). If `better-sqlite3` is not installed
+(it's an `optionalDependencies` entry, so `npm install` won't fail if
+it can't build), we silently fall back to a JSONL append-log with
+periodic in-place compaction. If the cache file can't be opened at
+all, we log once and fall back to in-memory — a disk problem will
+never take the relay offline.
+
+The circuit breaker keeps each ElectrumX host in `closed` (healthy),
+`open` (recent failure, skip for cooldown), or `half-open` (one probe
+slot) state. Failures double the cooldown (30 s → 1 min → 2 min → 4
+min → 5 min cap); successes reset it. If every configured host is
+open, the plugin still round-robins through them — better to attempt
+a flapping ElectrumX than to soft-accept every event without
+verification.
 
 ## Supported identifier forms
 

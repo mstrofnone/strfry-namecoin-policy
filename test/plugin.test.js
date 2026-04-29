@@ -101,9 +101,11 @@ test('plugin: tolerates malformed input line and keeps running', async () => {
   assert.equal(lines[1].id, 'e'.repeat(64));
 });
 
-test('plugin: rejects .bit NIP-05 when no ElectrumX configured? NO — soft-accepts', async () => {
-  // Design decision: without an ElectrumX host configured we can't verify,
-  // so we accept and log. Document this loudly.
+test('plugin: rejects .bit NIP-05 when no ElectrumX configured (fail-closed default)', async () => {
+  // Hardened default: without an ElectrumX host we can't verify, so we
+  // refuse rather than silently rubber-stamping the identity. Operators
+  // who explicitly want the legacy behavior must opt in via
+  // NAMECOIN_POLICY_SOFT_FAIL=true.
   const event = {
     type: 'new',
     event: {
@@ -112,8 +114,51 @@ test('plugin: rejects .bit NIP-05 when no ElectrumX configured? NO — soft-acce
       tags: [], created_at: 1, sig: '00',
     },
   };
-  const { code, stdout } = await runPlugin({ inputLines: [JSON.stringify(event)] });
+  const { code, stdout, stderr } = await runPlugin({
+    env: { NAMECOIN_POLICY_LOG_LEVEL: 'info' },
+    inputLines: [JSON.stringify(event)],
+  });
+  assert.equal(code, 0);
+  const res = JSON.parse(stdout.trim());
+  assert.equal(res.action, 'reject');
+  assert.match(res.msg, /Namecoin .bit NIP-05 verification unavailable/);
+  assert.match(stderr, /NAMECOIN_ELECTRUMX_HOST not set/);
+});
+
+test('plugin: NAMECOIN_POLICY_SOFT_FAIL=true restores legacy accept-everything', async () => {
+  const event = {
+    type: 'new',
+    event: {
+      id: '3'.repeat(64), pubkey: '4'.repeat(64), kind: 0,
+      content: JSON.stringify({ nip05: 'alice@testls.bit' }),
+      tags: [], created_at: 1, sig: '00',
+    },
+  };
+  const { code, stdout, stderr } = await runPlugin({
+    env: { NAMECOIN_POLICY_SOFT_FAIL: 'true' },
+    inputLines: [JSON.stringify(event)],
+  });
   assert.equal(code, 0);
   const res = JSON.parse(stdout.trim());
   assert.equal(res.action, 'accept');
+  // Banner about soft-fail still shows up.
+  assert.match(stderr, /SOFT_FAIL=true/);
+});
+
+test('plugin: NAMECOIN_ELECTRUMX_INSECURE=true emits a banner', async () => {
+  // No host needed for the banner check — we only assert stderr formatting.
+  const event = {
+    type: 'new',
+    event: {
+      id: '5'.repeat(64), pubkey: '6'.repeat(64), kind: 1,
+      content: '', tags: [], created_at: 1, sig: '00',
+    },
+  };
+  const { code, stderr } = await runPlugin({
+    env: { NAMECOIN_ELECTRUMX_INSECURE: 'true' },
+    inputLines: [JSON.stringify(event)],
+  });
+  assert.equal(code, 0);
+  assert.match(stderr, /TLS verification DISABLED/);
+  assert.match(stderr, /vulnerable to MITM/);
 });

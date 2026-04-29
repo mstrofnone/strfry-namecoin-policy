@@ -50,6 +50,64 @@ test('parseIdentifier: rejects multi-level .bit (sub.example.bit)', () => {
   assert.equal(NamecoinResolver.parseIdentifier('sub.example.bit'), null);
 });
 
+// ── Hardening: bound name length ──
+test('parseIdentifier: accepts stem of exactly 64 chars', () => {
+  const stem = 'a'.repeat(64);
+  assert.deepEqual(NamecoinResolver.parseIdentifier(`${stem}.bit`),
+    { namecoinName: `d/${stem}`, localPart: '_' });
+});
+
+test('parseIdentifier: rejects stem longer than 64 chars (.bit)', () => {
+  const stem = 'a'.repeat(65);
+  assert.equal(NamecoinResolver.parseIdentifier(`${stem}.bit`), null);
+  assert.equal(NamecoinResolver.parseIdentifier(`alice@${stem}.bit`), null);
+});
+
+test('parseIdentifier: rejects stem longer than 64 chars (d/ direct)', () => {
+  const stem = 'a'.repeat(65);
+  assert.equal(NamecoinResolver.parseIdentifier(`d/${stem}`), null);
+  assert.equal(NamecoinResolver.parseIdentifier(`id/${stem}`), null);
+});
+
+// ── Hardening: rate limiter integration ──
+test('resolve: rate-limited (acquire returns false) returns null and sets flag', async () => {
+  const client = {
+    calls: 0,
+    async nameShow() { this.calls++; return null; },
+  };
+  const limiter = { async acquire() { return false; } };
+  const r = new NamecoinResolver({ client, rateLimiter: limiter });
+  const res = await r.resolve('alice@testls.bit');
+  assert.equal(res, null);
+  assert.equal(r.lastWasRateLimited, true);
+  assert.equal(client.calls, 0, 'must NOT call ElectrumX when throttled');
+});
+
+test('resolve: cache hit does NOT consume a rate-limit token', async () => {
+  const client = {
+    calls: 0,
+    async nameShow() {
+      this.calls++;
+      return { name: 'd/testls', value: JSON.stringify({ nostr: 'a'.repeat(64) }) };
+    },
+  };
+  let acquireCount = 0;
+  const limiter = { async acquire() { acquireCount++; return true; } };
+  const r = new NamecoinResolver({ client, rateLimiter: limiter, cacheTtlMs: 60_000 });
+
+  // First resolve: cache miss, must acquire.
+  const first = await r.resolve('testls.bit');
+  assert.ok(first);
+  assert.equal(acquireCount, 1);
+  assert.equal(client.calls, 1);
+
+  // Second resolve same key: cache hit, must NOT acquire.
+  const second = await r.resolve('testls.bit');
+  assert.ok(second);
+  assert.equal(acquireCount, 1, 'cache hit must not consume a token');
+  assert.equal(client.calls, 1);
+});
+
 test('extractFromValue: simple domain form', () => {
   const json = JSON.stringify({ nostr: PK_ROOT });
   assert.deepEqual(
@@ -260,4 +318,73 @@ test('resolve: errors are not cached', async () => {
   assert.equal(await r.resolve('testls.bit'), null);
   assert.equal(await r.resolve('testls.bit'), null);
   assert.equal(nCalls, 2, 'errors must not be cached (allow retry)');
+});
+
+// ── Fix #5: negative-cache TTL split ─────────────────────────────────────
+
+test('resolve: parse-failure (no nostr key) uses short TTL', async () => {
+  let nCalls = 0;
+  const client = {
+    async nameShow() {
+      nCalls++;
+      // No nostr field — looks like a parse-failure / transient.
+      return { name: 'd/x', value: JSON.stringify({ www: 'http://example' }) };
+    },
+  };
+  const r = new NamecoinResolver({ client, cacheTtlMs: 60_000, negCacheTtlMs: 1 });
+  assert.equal(await r.resolve('x.bit'), null);
+  assert.equal(nCalls, 1);
+  // Wait past the short TTL
+  await new Promise((r2) => setTimeout(r2, 10));
+  assert.equal(await r.resolve('x.bit'), null);
+  assert.equal(nCalls, 2, 'parse-failure must be re-fetched after short TTL');
+});
+
+test('resolve: parse-failure (malformed JSON) uses short TTL', async () => {
+  let nCalls = 0;
+  const client = {
+    async nameShow() {
+      nCalls++;
+      return { name: 'd/x', value: '{"nostr": this is not json' };
+    },
+  };
+  const r = new NamecoinResolver({ client, cacheTtlMs: 60_000, negCacheTtlMs: 1 });
+  assert.equal(await r.resolve('x.bit'), null);
+  await new Promise((r2) => setTimeout(r2, 10));
+  assert.equal(await r.resolve('x.bit'), null);
+  assert.equal(nCalls, 2, 'malformed JSON value must be re-fetched after short TTL');
+});
+
+test('resolve: parse-failure (nameShow returned null) uses short TTL', async () => {
+  let nCalls = 0;
+  const client = {
+    async nameShow() { nCalls++; return null; },
+  };
+  const r = new NamecoinResolver({ client, cacheTtlMs: 60_000, negCacheTtlMs: 1 });
+  assert.equal(await r.resolve('x.bit'), null);
+  await new Promise((r2) => setTimeout(r2, 10));
+  assert.equal(await r.resolve('x.bit'), null);
+  assert.equal(nCalls, 2, 'nameShow null must be re-fetched after short TTL');
+});
+
+test('resolve: success-negative (record exists, no entry for this local-part) uses long TTL', async () => {
+  let nCalls = 0;
+  // Record has nostr.names but no entry for `bob`. The record itself is
+  // well-formed; this is a stable "no" answer that should cache long.
+  const client = {
+    async nameShow() {
+      nCalls++;
+      return {
+        name: 'd/x',
+        value: JSON.stringify({ nostr: { names: { _: 'a'.repeat(64) } } }),
+      };
+    },
+  };
+  const r = new NamecoinResolver({ client, cacheTtlMs: 60_000, negCacheTtlMs: 1 });
+  assert.equal(await r.resolve('bob@x.bit'), null);
+  assert.equal(nCalls, 1);
+  // Wait past the short TTL — must still be cached on the long TTL.
+  await new Promise((r2) => setTimeout(r2, 15));
+  assert.equal(await r.resolve('bob@x.bit'), null);
+  assert.equal(nCalls, 1, 'success-negative must keep the long TTL');
 });

@@ -27,7 +27,26 @@ const readline = require('readline');
 const { ElectrumXClient } = require('./electrumx');
 const { NamecoinResolver } = require('./resolver');
 const { LRUCache } = require('./cache');
+const { TokenBucket } = require('./ratelimit');
+const { PersistentLRU } = require('./persistent-cache');
+const { Metrics, NullMetrics } = require('./metrics');
 const { loadConfig, makeLogger } = require('./config');
+
+function emitInsecureBanner() {
+  const bar = '='.repeat(64);
+  console.error(bar);
+  console.error('WARNING: NAMECOIN_ELECTRUMX_INSECURE=true — TLS verification DISABLED.');
+  console.error('Your ElectrumX traffic is vulnerable to MITM. Use NAMECOIN_ELECTRUMX_CERT_PIN instead.');
+  console.error(bar);
+}
+
+function emitNoHostBanner({ softFail }) {
+  if (softFail) {
+    console.error('[strfry-namecoin-policy] WARN: NAMECOIN_ELECTRUMX_HOST not set and NAMECOIN_POLICY_SOFT_FAIL=true — accepting all events without verification (INSECURE).');
+  } else {
+    console.error('[strfry-namecoin-policy] WARN: NAMECOIN_ELECTRUMX_HOST not set — rejecting all .bit lookups (set NAMECOIN_POLICY_SOFT_FAIL=true to bypass)');
+  }
+}
 
 /**
  * Construct and run the plugin using process.stdin/stdout.
@@ -44,32 +63,68 @@ async function run({ env = process.env, stdin = process.stdin, stdout = process.
   }
   const logger = makeLogger(config.logLevel);
 
-  if (!config.host) {
-    logger('info', 'NAMECOIN_ELECTRUMX_HOST not set — plugin will accept all events without verification.');
+  if (config.insecure) emitInsecureBanner();
+  if (!config.host) emitNoHostBanner({ softFail: config.softFail });
+
+  // ── Metrics ─────────────────────────────────────────────────────────
+  const metrics = config.metricsPort > 0 ? new Metrics() : new NullMetrics();
+  if (config.metricsPort > 0) {
+    try {
+      await metrics.startServer({ port: config.metricsPort, host: '127.0.0.1', logger });
+    } catch (err) {
+      logger('info', `failed to start metrics listener on 127.0.0.1:${config.metricsPort}: ${err.message}`);
+    }
   }
 
-  const client = config.host ? new ElectrumXClient({
+  const client = (config.host || (config.hosts && config.hosts.length)) ? new ElectrumXClient({
     host: config.host,
     port: config.port,
     tls:  config.tls,
+    hosts: config.hosts,
+    socks5: config.socks5,
+    poolKeepaliveMs: config.poolKeepaliveMs,
     certPinSha256: config.certPinSha256,
     rejectUnauthorized: config.rejectUnauthorized,
     timeoutMs: config.timeoutMs,
     retries:   config.retries,
+    minConfirmations: config.minConfirmations,
+    metrics,
     logger,
   }) : null;
+
+  const rateLimiter = client ? new TokenBucket({
+    rps: config.lookupRps,
+    burst: config.lookupBurst,
+    queueMs: config.lookupQueueMs,
+  }) : null;
+
+  // ── Caches (persistent if NAMECOIN_POLICY_CACHE_PATH set) ───────────
+  const resolverCache = makeCache({
+    cachePath: config.cachePath,
+    namespace: 'resolver',
+    max: 2000,
+    ttlMs: config.cacheTtlMs,
+    logger,
+  });
+  const verifiedAuthors = makeCache({
+    cachePath: config.cachePath,
+    namespace: 'verifiedAuthors',
+    max: 20_000,
+    ttlMs: config.cacheTtlMs,
+    logger,
+  });
 
   const resolver = client ? new NamecoinResolver({
     client,
+    cache: resolverCache,
     cacheTtlMs: config.cacheTtlMs,
+    negCacheTtlMs: config.negCacheTtlMs,
+    metrics,
     logger,
+    rateLimiter,
   }) : null;
 
-  // Cache of pubkey -> true, for authors we've seen verified via a .bit kind:0
-  // this process. Only used for mode=all-kinds-require-bit.
-  const verifiedAuthors = new LRUCache({ max: 20_000, ttlMs: config.cacheTtlMs });
-
-  const handler = makeHandler({ config, resolver, verifiedAuthors, logger });
+  const handler = makeHandler({ config, resolver, verifiedAuthors, metrics, logger });
 
   const rl = readline.createInterface({
     input: stdin,
@@ -117,26 +172,33 @@ async function run({ env = process.env, stdin = process.stdin, stdout = process.
  *
  * @returns {(req:any) => Promise<{id:any, action:string, msg?:string}>}
  */
-function makeHandler({ config, resolver, verifiedAuthors, logger }) {
+function makeHandler({ config, resolver, verifiedAuthors, metrics, logger }) {
+  const m = metrics || new NullMetrics();
+  const accept = (id) => { m.inc('acceptances_total'); return { id, action: 'accept' }; };
+  const reject = (id, reason, msg) => {
+    m.inc('rejections_total', { reason });
+    return { id, action: 'reject', msg };
+  };
+
   return async function handle(req) {
     if (!req || typeof req !== 'object') {
-      return { id: null, action: 'reject', msg: 'invalid: non-object plugin message' };
+      return reject(null, 'non-object', 'invalid: non-object plugin message');
     }
     if (req.type !== 'new') {
       logger('debug', `ignoring non-new request type: ${req.type}`);
-      return { id: req?.event?.id ?? null, action: 'accept' };
+      return accept(req?.event?.id ?? null);
     }
 
     const event = req.event;
     if (!event || typeof event !== 'object' || typeof event.id !== 'string') {
-      return { id: null, action: 'reject', msg: 'invalid: missing event' };
+      return reject(null, 'missing-event', 'invalid: missing event');
     }
     const id = event.id;
     const kind = Number(event.kind);
     const pubkey = typeof event.pubkey === 'string' ? event.pubkey.toLowerCase() : '';
 
     if (!pubkey) {
-      return { id, action: 'reject', msg: 'invalid: missing event.pubkey' };
+      return reject(id, 'missing-pubkey', 'invalid: missing event.pubkey');
     }
 
     // ── Kind 0: metadata. Check nip05 field. ──
@@ -144,7 +206,7 @@ function makeHandler({ config, resolver, verifiedAuthors, logger }) {
       const nip05 = extractNip05(event.content);
       if (!nip05) {
         logger('debug', `kind0 ${id} has no nip05 — accept`);
-        return { id, action: 'accept' };
+        return accept(id);
       }
 
       const lowered = nip05.toLowerCase();
@@ -153,44 +215,57 @@ function makeHandler({ config, resolver, verifiedAuthors, logger }) {
       if (!isNamecoin) {
         if (config.allowNonBit) {
           logger('debug', `kind0 ${id} nip05=${nip05} non-.bit — accept (pass-through)`);
-          return { id, action: 'accept' };
+          return accept(id);
         }
-        return { id, action: 'reject',
-          msg: 'blocked: only Namecoin .bit NIP-05 identifiers are accepted on this relay' };
+        return reject(id, 'non-bit-blocked',
+          'blocked: only Namecoin .bit NIP-05 identifiers are accepted on this relay');
       }
 
       if (!resolver) {
-        // No resolver configured — treat as soft-fail.
-        logger('info', `kind0 ${id} has .bit NIP-05 but no ElectrumX configured — accept`);
-        return { id, action: 'accept' };
+        // No ElectrumX configured. Default = fail closed (reject .bit
+        // lookups we can't verify). Setting NAMECOIN_POLICY_SOFT_FAIL=true
+        // restores the legacy accept-everything behavior.
+        if (config.softFail) {
+          logger('info', `kind0 ${id} has .bit NIP-05 but no ElectrumX configured \u2014 accept (SOFT_FAIL)`);
+          return accept(id);
+        }
+        return reject(id, 'no-resolver',
+          'blocked: Namecoin .bit NIP-05 verification unavailable (no ElectrumX configured)');
       }
 
+      const t0 = Date.now();
       const resolved = await resolver.resolve(lowered);
+      m.observe('lookup_duration_ms', Date.now() - t0);
+
       if (!resolved) {
-        return { id, action: 'reject',
-          msg: `invalid: Namecoin NIP-05 "${nip05}" could not be resolved (name missing, expired, or malformed)` };
+        if (resolver.lastWasRateLimited) {
+          return reject(id, 'rate-limited',
+            'rate-limited: too many .bit lookups in flight, try again');
+        }
+        return reject(id, 'unresolved',
+          `invalid: Namecoin NIP-05 "${nip05}" could not be resolved (name missing, expired, or malformed)`);
       }
       if (resolved.pubkey !== pubkey) {
-        return { id, action: 'reject',
-          msg: `invalid: Namecoin NIP-05 "${nip05}" maps to ${resolved.pubkey.slice(0, 16)}… but event.pubkey is ${pubkey.slice(0, 16)}…` };
+        return reject(id, 'pubkey-mismatch',
+          `invalid: Namecoin NIP-05 "${nip05}" maps to ${resolved.pubkey.slice(0, 16)}… but event.pubkey is ${pubkey.slice(0, 16)}…`);
       }
 
       // Remember this pubkey for all-kinds-require-bit mode.
       verifiedAuthors.set(pubkey, true);
       logger('info', `kind0 ${id} verified Namecoin NIP-05 "${nip05}" → ${pubkey.slice(0, 16)}…`);
-      return { id, action: 'accept' };
+      return accept(id);
     }
 
     // ── Non-kind-0 events ──
     if (config.mode === 'all-kinds-require-bit') {
       if (verifiedAuthors.has(pubkey)) {
-        return { id, action: 'accept' };
+        return accept(id);
       }
-      return { id, action: 'reject',
-        msg: 'blocked: this relay requires a verified Namecoin .bit NIP-05 identity (publish a kind:0 first)' };
+      return reject(id, 'unverified-author',
+        'blocked: this relay requires a verified Namecoin .bit NIP-05 identity (publish a kind:0 first)');
     }
 
-    return { id, action: 'accept' };
+    return accept(id);
   };
 }
 
@@ -202,6 +277,9 @@ function extractNip05(content) {
   let doc;
   try { doc = JSON.parse(content); } catch (_) { return null; }
   if (!doc || typeof doc !== 'object') return null;
+  // typeof [] === 'object' — reject arrays so a kind:0 with content
+  // = '["alice@x.bit"]' can't sneak through.
+  if (Array.isArray(doc)) return null;
   const nip05 = doc.nip05;
   if (typeof nip05 !== 'string') return null;
   const trimmed = nip05.trim();
@@ -222,4 +300,26 @@ function writeLine(stream, obj) {
   }
 }
 
-module.exports = { run, makeHandler, extractNip05 };
+/**
+ * Build a cache: PersistentLRU when cachePath is set, otherwise LRUCache.
+ * If PersistentLRU construction fails (disk perms, sqlite corruption, etc.),
+ * fall back to in-memory LRU and log loudly. We don't want a cache-disk
+ * issue to take the relay offline.
+ */
+function makeCache({ cachePath, namespace, max, ttlMs, logger }) {
+  if (!cachePath) return new LRUCache({ max, ttlMs });
+  try {
+    return new PersistentLRU({
+      path: cachePath,
+      namespace,
+      max,
+      ttlMs,
+      logger,
+    });
+  } catch (err) {
+    logger('info', `persistent cache (${namespace}) at ${cachePath} unavailable: ${err.message} — using in-memory only`);
+    return new LRUCache({ max, ttlMs });
+  }
+}
+
+module.exports = { run, makeHandler, extractNip05, makeCache };
