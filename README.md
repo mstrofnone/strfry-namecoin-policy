@@ -104,13 +104,60 @@ verification path.
 [nx]: https://github.com/namecoin/electrumx
 [nmc]: https://github.com/namecoin/namecoin-core
 
-### 3. Mixed / failover
+### 3. Mixed / failover (recommended for production)
 
-The plugin opens one short-lived TCP/TLS connection per uncached resolve,
-so swapping the `NAMECOIN_ELECTRUMX_HOST` env var and restarting strfry is
-the entire "failover" procedure. There is no built-in pool of servers; if
-you want HA, run a TCP load balancer (e.g. HAProxy) in front of multiple
-ElectrumX endpoints and point the plugin at the LB.
+The plugin has built-in support for an **ordered list of ElectrumX
+servers** with circuit-breaker style failover. Set
+`NAMECOIN_ELECTRUMX_HOSTS` (plural) instead of
+`NAMECOIN_ELECTRUMX_HOST` (singular) and the plugin will:
+
+- Try hosts in list order, picking the first marked healthy.
+- On success, mark the host healthy and reset its failure counter.
+- On a connect/handshake error or timeout, increment the host's
+  failure counter; once a small threshold is reached, the host is
+  marked *open* (failing fast) for a short cooldown before being
+  probed again.
+- *Definitive* errors from the resolver path (name expired, name
+  missing, malformed value) propagate immediately and do **not**
+  record a host failure — they are facts about the chain, not about
+  the host.
+
+The **recommended production topology** is *local primary, public
+fallback*:
+
+```sh
+# Local first, public second. Order matters — local is tried first.
+export NAMECOIN_ELECTRUMX_HOSTS="127.0.0.1:50002,electrumx.testls.space:50002"
+export NAMECOIN_ELECTRUMX_TLS="true"
+
+# Pin every host. Comma-separated; mix DER hex and `sha256/<base64>`
+# SPKI pins freely. Each is matched independently per host.
+export NAMECOIN_ELECTRUMX_CERT_PIN="<local-der-sha256-hex>,<public-der-sha256-hex>"
+```
+
+A full wrapper is at
+[`examples/wrapper-multi-host.sh`](./examples/wrapper-multi-host.sh).
+
+Why local-primary?
+
+- A single public ElectrumX is a single point of failure exactly like
+  DNS + Web PKI was. The whole point of Namecoin `.bit` NIP-05 is to
+  remove that dependency for clients; a relay should not reintroduce
+  it server-side.
+- Local lookups never leak per-event author metadata to a third
+  party.
+- Local lookups remove the per-lookup network latency that otherwise
+  dominates write-policy decision time on busy relays.
+
+The end-to-end deploy script in
+[namecoin/namecoin.org PR #749](https://github.com/namecoin/namecoin.org/pull/749)
+automates the namecoind + ElectrumX-NMC half of this setup.
+
+If you want HA across more than one host, you can also still front a
+TCP load balancer (e.g. HAProxy) and list the LB as a single
+`NAMECOIN_ELECTRUMX_HOSTS` entry — but the plugin's own circuit
+breaker is usually sufficient and avoids the LB as a new single
+point of failure.
 
 ### What this plugin does **not** do
 
@@ -176,8 +223,9 @@ Make both files executable and restart strfry. A full example is in
 
 | Variable | Default | Description |
 |---|---|---|
-| `NAMECOIN_ELECTRUMX_HOST` | *(required†)* | Hostname of the ElectrumX server. **Without it (and without `NAMECOIN_ELECTRUMX_HOSTS`), the plugin fails closed by default** — see `NAMECOIN_POLICY_SOFT_FAIL`. † Either `NAMECOIN_ELECTRUMX_HOST` or `NAMECOIN_ELECTRUMX_HOSTS` (multi-host) satisfies this requirement. |
-| `NAMECOIN_ELECTRUMX_PORT` | `50002` (TLS) / `50001` (TCP) | TCP port. |
+| `NAMECOIN_ELECTRUMX_HOST` | *(see note)* | Single-host shorthand. Hostname of the ElectrumX server. Either this **or** `NAMECOIN_ELECTRUMX_HOSTS` (multi-host) must be set; without either, the plugin fails closed by default — see `NAMECOIN_POLICY_SOFT_FAIL`. |
+| `NAMECOIN_ELECTRUMX_PORT` | `50002` (TLS) / `50001` (TCP) | TCP port. Used with `NAMECOIN_ELECTRUMX_HOST` only. |
+| `NAMECOIN_ELECTRUMX_HOSTS` | *(see note)* | Multi-host list, comma-separated `host:port[,host:port,…]`. Overrides `NAMECOIN_ELECTRUMX_HOST/_PORT` when set. Tried in list order with per-host circuit breaker (failures → short cooldown → probe). Recommended for production; see [Deployment topologies §3](#3-mixed--failover-recommended-for-production) and [`examples/wrapper-multi-host.sh`](./examples/wrapper-multi-host.sh). |
 | `NAMECOIN_ELECTRUMX_TLS` | `true` | Use TLS (`true`/`false`). |
 | `NAMECOIN_ELECTRUMX_CERT_PIN` | — | One or more cert pins (comma-separated for rotation). Each pin is either a 64-hex SHA-256 of the DER cert, or `sha256/<base64>` for a SubjectPublicKeyInfo pin. When set, the system trust store is bypassed and only matching certs are accepted. |
 | `NAMECOIN_ELECTRUMX_INSECURE` | `false` | If `true`, disable TLS verification entirely. **For testing only** — production setups should pin a cert instead. Triggers a loud startup banner. |
@@ -214,7 +262,16 @@ them comma-separated (any-match):
   openssl dgst -sha256 -binary | base64`. Configure as e.g.
   `NAMECOIN_ELECTRUMX_CERT_PIN="sha256/AAAA...=,sha256/BBBB...="` to allow
   a current and a next-rotation key simultaneously.
-| `NAMECOIN_ELECTRUMX_HOSTS` | — | Comma-separated `host:port[,host:port,…]` list. Overrides `*_HOST/*_PORT` when set. Round-robin with per-host circuit breaker (30s open, exp backoff to 5min). See [Operational](#operational). |
+
+When using `NAMECOIN_ELECTRUMX_HOSTS` (multi-host), every host's cert
+is matched against the same comma-separated pin list independently —
+so a single string can pin a local self-signed cert and one or more
+public-server certs at the same time. Example:
+
+```sh
+export NAMECOIN_ELECTRUMX_HOSTS="127.0.0.1:50002,electrumx.testls.space:50002"
+export NAMECOIN_ELECTRUMX_CERT_PIN="<local-der-sha256-hex>,<public-der-sha256-hex>"
+```
 | `NAMECOIN_ELECTRUMX_SOCKS5` | — | `host:port` of a no-auth SOCKS5 proxy (e.g. `127.0.0.1:9050` for Tor). DNS is delegated to the proxy. |
 | `NAMECOIN_POLICY_CACHE_PATH` | — | If set, both the resolver cache and verified-author set persist to this file. Uses `better-sqlite3` (optional dep) when available, falls back to a JSONL append-log otherwise. |
 | `NAMECOIN_POLICY_METRICS_PORT` | `0` | If non-zero, expose Prometheus metrics on `127.0.0.1:<port>/metrics`. Always bound to localhost. |

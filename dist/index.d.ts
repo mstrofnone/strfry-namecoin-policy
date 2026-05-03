@@ -78,4 +78,17 @@ export function makeCache({ cachePath, namespace, max, ttlMs, logger }: {
 export function hasImetaTag(event: any): boolean;
 export function isWhitelisted(nip9a: any, pubkey: any): boolean;
 export function humanise(v: any): string;
+/**
+ * True iff the config has neither a single-host shorthand
+ * (NAMECOIN_ELECTRUMX_HOST) nor a non-empty multi-host list
+ * (NAMECOIN_ELECTRUMX_HOSTS). Either form drives a working
+ * ElectrumXClient, so we should not warn when only the multi-host form
+ * is set. Exported for tests.
+ *
+ * @param {{host?:string|null, hosts?:Array<unknown>|null}} cfg
+ */
+export function shouldEmitNoHostBanner(cfg: {
+    host?: string | null;
+    hosts?: Array<unknown> | null;
+}): boolean;
 import { LRUCache } from "./cache";
