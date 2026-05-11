@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## v0.3.0 — unreleased
+
+### Added
+- **NIP-9A rules enforcement.** New optional layer that validates accepted
+  events against a signed `kind:34551` *Verifiable Community Rules*
+  document
+  ([nostr-protocol/nips#2331](https://github.com/nostr-protocol/nips/pull/2331)).
+  Shares evaluation order with the Quartz validator merged in
+  [vitorpamplona/amethyst#2758](https://github.com/vitorpamplona/amethyst/pull/2758)
+  and the JS reference in
+  [mstrofnone/nip9a-refimpl](https://github.com/mstrofnone/nip9a-refimpl).
+  Author deny-list, kind whitelist, per-kind and global size caps,
+  per-day quota gate (passive), WoT gate (passive), and anti-rollback
+  ratchet are all honoured. New modules `src/nip9a-parser.js`,
+  `src/nip9a-validator.js`, `src/nip9a-loader.js`.
+- **New env vars** (all default-off; off = full back-compat with v0.2.x):
+    - `NAMECOIN_POLICY_NIP9A_RULES_FILE` — path to a signed rules event
+      JSON. Re-read on `SIGHUP` and mtime change. Atomic-rename safe.
+    - `NAMECOIN_POLICY_NIP9A_COMMUNITY` — `34550:<hex64>:<d>` address
+      pointer that filters which rules events the loader accepts.
+    - `NAMECOIN_POLICY_NIP9A_REQUIRE_RULES` — reject everything when the
+      loader has no active rules document. Default `false`; rules
+      absence is pass-through per NIP-9A behaviour spec.
+    - `NAMECOIN_POLICY_NIP9A_REJECT_IMETA_KIND1` — defence-in-depth
+      toggle for the common "text-only kind:1 except whitelisted
+      uploaders" deployment.
+- 50+ new tests across parser, validator, loader and handler
+  integration. Loader survives transient atomic-rename gaps and
+  malformed JSON without losing prior state.
+
+### Behaviour change (back-compat)
+- `kind:34551` events are still accepted by the standard `.bit` author
+  gate. With NIP-9A integration disabled (the default), behaviour is
+  unchanged. With NIP-9A integration on, `kind:34551` events are accepted
+  unconditionally for `kind0-only` mode and require a verified `.bit`
+  author for `all-kinds-require-bit` mode — the kind-whitelist check is
+  bypassed for protocol events so the owner can publish rules updates
+  even when the active rules don't list `34551`.
+
 ## v0.2.0 — unreleased
 
 ### Security

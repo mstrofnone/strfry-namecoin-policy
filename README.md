@@ -193,6 +193,10 @@ Make both files executable and restart strfry. A full example is in
 | `NAMECOIN_POLICY_LOOKUP_BURST` | `10` | Max burst size for ElectrumX lookups. |
 | `NAMECOIN_POLICY_LOOKUP_QUEUE_MS` | `2000` | Max time (ms) a single lookup will wait for a token before returning a `rate-limited:` reject. |
 | `NAMECOIN_POLICY_SOFT_FAIL` | `false` | If `true` and `NAMECOIN_ELECTRUMX_HOST` is unset, accept all events without verification (legacy behavior). Default fails closed. |
+| `NAMECOIN_POLICY_NIP9A_RULES_FILE` | — | Path to a signed `kind:34551` JSON event. Loaded at startup and re-read on `SIGHUP`. See [NIP-9A integration](#nip-9a-integration). |
+| `NAMECOIN_POLICY_NIP9A_COMMUNITY` | — | Owner-pinned community address pointer `34550:<hex64>:<d>`. Only rules events from the matching owner+d are accepted by the loader. |
+| `NAMECOIN_POLICY_NIP9A_REQUIRE_RULES` | `false` | If `true`, reject every non-rules event whenever no NIP-9A rules document is in force. Default is to pass through (rules absence ≠ deny-by-default per NIP). |
+| `NAMECOIN_POLICY_NIP9A_REJECT_IMETA_KIND1` | `false` | Defence-in-depth: reject `kind:1` events with `imeta` tags (NIP-92) from authors that are not explicitly `p allow` in the rules document. Lets relays enforce "text-only kind:1 except for whitelisted uploaders" without inventing a non-spec extension. |
 
 ### Cert pin formats
 
@@ -215,6 +219,137 @@ them comma-separated (any-match):
 | `NAMECOIN_POLICY_CACHE_PATH` | — | If set, both the resolver cache and verified-author set persist to this file. Uses `better-sqlite3` (optional dep) when available, falls back to a JSONL append-log otherwise. |
 | `NAMECOIN_POLICY_METRICS_PORT` | `0` | If non-zero, expose Prometheus metrics on `127.0.0.1:<port>/metrics`. Always bound to localhost. |
 | `NAMECOIN_POLICY_POOL_KEEPALIVE_MS` | `30000` | Idle timeout for the warm ElectrumX connection pool. Set to `0` to use one-connection-per-resolve mode. |
+
+## NIP-9A integration
+
+This plugin can enforce a [NIP-9A](https://github.com/nostr-protocol/nips/pull/2331)
+*Verifiable Community Rules* document on top of the Namecoin `.bit` author
+gate. The rules document is a signed `kind:34551` event published by the
+community owner; it declares the whitelisted event kinds, optional per-kind
+size caps and quotas, per-pubkey allow/deny overrides, an optional WoT gate,
+and an anti-rollback ratchet. Same schema as the merged Quartz validator in
+[vitorpamplona/amethyst#2758](https://github.com/vitorpamplona/amethyst/pull/2758)
+and the JS reference in
+[mstrofnone/nip9a-refimpl](https://github.com/mstrofnone/nip9a-refimpl);
+cross-implementation tests in that repo assert wire compatibility.
+
+### When to enable it
+
+This plugin's `mode=all-kinds-require-bit` already gates *who* can publish.
+NIP-9A gates *what* they can publish:
+
+- **"Anyone with a verified `.bit` identity can post text, only whitelisted
+  pubkeys can post other kinds"** — the textbook deployment, and the reason
+  this integration exists. Publish a `kind:34551` whose `k` tags whitelist
+  the text kinds (`1`, `0`, `7`, `5`, `3`, `10002`, `1111`, `9735`) and use
+  `p allow` tags for the uploaders. Combine with
+  `NAMECOIN_POLICY_NIP9A_REJECT_IMETA_KIND1=true` to also block in-line
+  media-via-`imeta` from non-uploaders.
+- **Per-author quotas** are part of the spec but not enforced server-side
+  by this plugin (no quota counter to consult). They are still enforced
+  client-side by Amethyst's composer validation
+  ([vitorpamplona/amethyst#2798](https://github.com/vitorpamplona/amethyst/pull/2798)).
+- **WoT gates** likewise; clients enforce, this plugin does not.
+
+### How the loader picks the active rules document
+
+The loader maintains a small in-memory cache of `kind:34551` candidates and
+picks the active one as follows:
+
+1. If `NAMECOIN_POLICY_NIP9A_COMMUNITY="34550:<owner-hex>:<d>"` is set, only
+   events with matching `pubkey` and `d` tag are admitted.
+2. If `NAMECOIN_POLICY_NIP9A_RULES_FILE=/path/to/rules.json` is set, the
+   file is read at startup and on every mtime change (~5 s poll). The file
+   must be the JSON-encoded `kind:34551` event (`{id, pubkey, created_at,
+   kind, tags, content, sig}`). Atomic-rename writes are supported (missing
+   file mid-rename does not lose state).
+3. Incoming `kind:34551` events accepted by the standard `.bit` author gate
+   are also offered to the loader, so the owner can publish updates over
+   Nostr without restarting the relay.
+4. The picker takes the highest `min_rules_created_at` ratchet across all
+   candidates and then returns the latest survivor by `created_at`.
+
+See [`src/nip9a-loader.js`](src/nip9a-loader.js) for the implementation.
+
+### Whitelist semantics (important)
+
+NIP-9A's `p allow` does **not** silently expand the kind whitelist — that
+would let any allow-listed pubkey publish kinds the rules don't declare,
+bypassing the document's whole point. Whitelist semantics in this plugin are:
+
+- `p allow` bypasses the **WoT gate** for that pubkey.
+- `p allow` allows that pubkey to publish `kind:1` with `imeta` tags when
+  `NAMECOIN_POLICY_NIP9A_REJECT_IMETA_KIND1=true` (this plugin's
+  defence-in-depth toggle, *not* a NIP-9A semantic — orthogonal layer).
+- `p deny` rejects that pubkey from publishing any kind, overriding any
+  `p allow` for the same pubkey (spec semantics).
+
+**Two-tier deployments** that need "baseline text + uploaders also get
+kind:1063" should publish two `kind:34551` documents and rotate which one
+is served on disk via a deploy-time symlink, or extend `kindRules` to
+declare the uploader kinds and pair them with `p allow` for those
+uploaders so the human-readable intent matches the wire effect.
+
+### Composing rules events
+
+```jsonc
+// kind:34551 event payload, before signing
+{
+  "kind": 34551,
+  "pubkey": "<owner-hex>",
+  "created_at": 1746604800,
+  "tags": [
+    ["d", "relay-testls-bit"],
+    ["a", "34550:<owner-hex>:relay-testls-bit"],
+
+    // Text baseline — open to every verified .bit author.
+    ["k", "0"],                  // metadata
+    ["k", "1", "16384"],         // short notes, 16 KB cap
+    ["k", "3"],                  // contacts
+    ["k", "5"],                  // deletions
+    ["k", "6"],                  // reposts
+    ["k", "7"],                  // reactions
+    ["k", "1111", "16384"],      // threaded comment (NIP-22)
+    ["k", "9735"],               // zap receipts
+    ["k", "10002"],              // relay-list metadata
+
+    // File-handling kinds — whitelisted authors only (set them as
+    // `p allow` AND publish a sibling rules doc that adds these `k`
+    // entries, or use a layered enforcement script — see above).
+    // ["k", "1063", "262144"],   // NIP-94 file metadata
+    // ["k", "20", "524288"],     // NIP-68 picture-first
+
+    // Whitelist of pubkeys allowed to post file-type events.
+    // Populate from the seed script (see below).
+    ["p", "<vip-pubkey-1>", "allow", "uploader"],
+    ["p", "<vip-pubkey-2>", "allow", "uploader"],
+
+    // Anti-rollback ratchet — defends against stolen-key replay of
+    // older laxer versions.
+    ["min_rules_created_at", "1746604800"],
+
+    // Hard global cap independent of kind.
+    ["max_event_size", "524288"]
+  ],
+  "content": ""
+}
+```
+
+Sign with the community owner's key (e.g. via
+[`nip9a-refimpl/tools/sign-rules.js`](https://github.com/mstrofnone/nip9a-refimpl)
+or any Nostr signing tool) and publish either:
+
+- as a JSON file at `NAMECOIN_POLICY_NIP9A_RULES_FILE` (operator-controlled,
+  recommended for relay-scoped policy), **or**
+- to the relay itself as a Nostr event — the plugin will absorb it.
+
+Live deploy example (`SIGHUP` re-reads the file without restarting strfry):
+
+```sh
+install -o root -g strfry -m 0640 \
+    rules.json /etc/strfry/nip9a-rules.json
+systemctl kill -s SIGHUP strfry
+```
 
 ## Operational
 

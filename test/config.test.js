@@ -320,3 +320,37 @@ test('makeLogger: unknown msgLevel falls back to info-class threshold', () => {
   assert.equal(a.length, 1);
   assert.equal(b.length, 0);
 });
+
+// ── NIP-9A config knobs ──
+
+test('loadConfig: nip9a fields default to null/false', () => {
+  const c = loadConfig({ NAMECOIN_ELECTRUMX_HOST: 'x' });
+  assert.equal(c.nip9aRulesFile, null);
+  assert.equal(c.nip9aCommunity, null);
+  assert.equal(c.nip9aRequireRules, false);
+  assert.equal(c.nip9aRejectImetaKind1, false);
+});
+
+test('loadConfig: nip9a knobs parse from env', () => {
+  const c = loadConfig({
+    NAMECOIN_ELECTRUMX_HOST: 'x',
+    NAMECOIN_POLICY_NIP9A_RULES_FILE: '/etc/strfry/rules.json',
+    NAMECOIN_POLICY_NIP9A_COMMUNITY: '34550:abc:relay',
+    NAMECOIN_POLICY_NIP9A_REQUIRE_RULES: 'true',
+    NAMECOIN_POLICY_NIP9A_REJECT_IMETA_KIND1: 'yes',
+  });
+  assert.equal(c.nip9aRulesFile, '/etc/strfry/rules.json');
+  assert.equal(c.nip9aCommunity, '34550:abc:relay');
+  assert.equal(c.nip9aRequireRules, true);
+  assert.equal(c.nip9aRejectImetaKind1, true);
+});
+
+test('loadConfig: nip9a empty strings → null', () => {
+  const c = loadConfig({
+    NAMECOIN_ELECTRUMX_HOST: 'x',
+    NAMECOIN_POLICY_NIP9A_RULES_FILE: '   ',
+    NAMECOIN_POLICY_NIP9A_COMMUNITY: '',
+  });
+  assert.equal(c.nip9aRulesFile, null);
+  assert.equal(c.nip9aCommunity, null);
+});

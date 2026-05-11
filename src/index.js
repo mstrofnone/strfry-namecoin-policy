@@ -31,6 +31,9 @@ const { TokenBucket } = require('./ratelimit');
 const { PersistentLRU } = require('./persistent-cache');
 const { Metrics, NullMetrics } = require('./metrics');
 const { loadConfig, makeLogger } = require('./config');
+const { Nip9aLoader } = require('./nip9a-loader');
+const { validate: nip9aValidate, eventByteSize: nip9aSize, Violations: NIP9A_V } = require('./nip9a-validator');
+const { NIP9A_KIND } = require('./nip9a-parser');
 
 function emitInsecureBanner() {
   const bar = '='.repeat(64);
@@ -124,7 +127,25 @@ async function run({ env = process.env, stdin = process.stdin, stdout = process.
     rateLimiter,
   }) : null;
 
-  const handler = makeHandler({ config, resolver, verifiedAuthors, metrics, logger });
+  // ── NIP-9A rules loader (https://github.com/nostr-protocol/nips/pull/2331) ──
+  // Only constructed when at least one of file or community is set. If both
+  // are unset the loader is null and no rules enforcement runs (back-compat
+  // for v0.2.x deployments).
+  let nip9a = null;
+  if (config.nip9aRulesFile || config.nip9aCommunity) {
+    nip9a = new Nip9aLoader({
+      filePath: config.nip9aRulesFile,
+      community: config.nip9aCommunity,
+      logger,
+    });
+    nip9a.start();
+    process.on('SIGHUP', () => {
+      logger('info', 'nip9a: SIGHUP received, reloading rules file');
+      nip9a.reload();
+    });
+  }
+
+  const handler = makeHandler({ config, resolver, verifiedAuthors, metrics, logger, nip9a });
 
   const rl = readline.createInterface({
     input: stdin,
@@ -172,7 +193,7 @@ async function run({ env = process.env, stdin = process.stdin, stdout = process.
  *
  * @returns {(req:any) => Promise<{id:any, action:string, msg?:string}>}
  */
-function makeHandler({ config, resolver, verifiedAuthors, metrics, logger }) {
+function makeHandler({ config, resolver, verifiedAuthors, metrics, logger, nip9a }) {
   const m = metrics || new NullMetrics();
   const accept = (id) => { m.inc('acceptances_total'); return { id, action: 'accept' }; };
   const reject = (id, reason, msg) => {
@@ -199,6 +220,23 @@ function makeHandler({ config, resolver, verifiedAuthors, metrics, logger }) {
 
     if (!pubkey) {
       return reject(id, 'missing-pubkey', 'invalid: missing event.pubkey');
+    }
+
+    // ── NIP-9A rules events: never block protocol traffic. The owner needs
+    //    to be able to publish rules updates even if the current rules
+    //    document does not whitelist kind:34551. Offer to the loader for
+    //    live updates, then accept iff the .bit author gate would otherwise
+    //    let the author publish anything (mode=kind0-only always, or
+    //    mode=all-kinds-require-bit when the pubkey is in verifiedAuthors).
+    //    See nip9a-refimpl/bin/strfry-policy.js for the same convention.
+    if (kind === NIP9A_KIND && nip9a) {
+      const accepted = nip9a.offer(event, 'stream');
+      logger('debug', `kind ${NIP9A_KIND} (NIP-9A rules) ${accepted ? 'absorbed' : 'ignored by loader'}`);
+      if (config.mode !== 'all-kinds-require-bit' || verifiedAuthors.has(pubkey)) {
+        return accept(id);
+      }
+      return reject(id, 'unverified-author',
+        'blocked: rules events from this pubkey require a verified Namecoin .bit NIP-05 first (publish a kind:0 first)');
     }
 
     // ── Kind 0: metadata. Check nip05 field. ──
@@ -256,17 +294,90 @@ function makeHandler({ config, resolver, verifiedAuthors, metrics, logger }) {
       return accept(id);
     }
 
-    // ── Non-kind-0 events ──
+    // ── Non-kind-0 events: .bit author gate first, then NIP-9A rules gate. ──
     if (config.mode === 'all-kinds-require-bit') {
-      if (verifiedAuthors.has(pubkey)) {
-        return accept(id);
+      if (!verifiedAuthors.has(pubkey)) {
+        return reject(id, 'unverified-author',
+          'blocked: this relay requires a verified Namecoin .bit NIP-05 identity (publish a kind:0 first)');
       }
-      return reject(id, 'unverified-author',
-        'blocked: this relay requires a verified Namecoin .bit NIP-05 identity (publish a kind:0 first)');
+    }
+
+    // ── NIP-9A rules gate. Applies AFTER .bit verification so the rules
+    //    document only sees events from authors the relay has already
+    //    decided are allowed to write at all. The whitelist `p allow` tags
+    //    are layered on top: NIP-9A's kind whitelist (`k`) gates the
+    //    baseline; per-pubkey `p allow` tags can DENY only (per spec
+    //    semantics, allow is informational unless the rules expand kinds
+    //    via a parallel rules doc).
+    //
+    //    See README "NIP-9A integration" and `nip9a-validator.js` for the
+    //    exact evaluation order.
+    if (nip9a && (nip9a.hasActive() || config.nip9aRequireRules)) {
+      const rules = nip9a.active();
+      if (!rules) {
+        if (config.nip9aRequireRules) {
+          return reject(id, 'nip9a-no-rules',
+            'blocked: no NIP-9A rules document in force (relay startup or misconfiguration)');
+        }
+      } else {
+        const violation = nip9aValidate(rules, {
+          author: pubkey,
+          kind,
+          sizeBytes: nip9aSize(event),
+          // No quota tracking in this layer; see README "Limitations".
+          // No WoT resolver here; relays SHOULD defer WoT to clients per NIP-9A.
+        });
+        if (violation) {
+          return reject(id, `nip9a:${violation.type}`,
+            `nip-9a: ${humanise(violation)}`);
+        }
+      }
+    }
+
+    // ── Optional defence-in-depth: reject kind:1 with imeta tags from
+    //    non-whitelisted authors. NIP-9A's `k` tag whitelists kinds, but
+    //    kind:1 events can still carry file attachments via `imeta` tags
+    //    (NIP-92) pointing at Blossom / IPFS / arbitrary http(s) hosts.
+    //    Operators wanting hard "text-only kind:1" should enable this and
+    //    list trusted uploaders as `p allow` in the rules.
+    if (config.nip9aRejectImetaKind1 && kind === 1 && hasImetaTag(event) && !isWhitelisted(nip9a, pubkey)) {
+      return reject(id, 'nip9a:imeta-blocked',
+        'blocked: kind:1 with imeta media tags requires whitelist (publish via an allowed pubkey)');
     }
 
     return accept(id);
   };
+}
+
+function humanise(v) {
+  switch (v.type) {
+    case NIP9A_V.STALE_RULES:        return `stale rules (created_at=${v.rulesCreatedAt} < min=${v.minRulesCreatedAt})`;
+    case NIP9A_V.AUTHOR_DENIED:      return `author ${v.author.slice(0,16)}… is on the deny-list for this community`;
+    case NIP9A_V.KIND_NOT_ALLOWED:   return `kind ${v.kind} is not allowed by community rules (whitelisted kinds only)`;
+    case NIP9A_V.KIND_SIZE_EXCEEDED: return `kind ${v.kind} event of ${v.sizeBytes}B exceeds per-kind cap ${v.maxBytes}B`;
+    case NIP9A_V.MAX_SIZE_EXCEEDED:  return `event of ${v.sizeBytes}B exceeds max_event_size ${v.maxBytes}B`;
+    case NIP9A_V.QUOTA_EXCEEDED:     return `kind ${v.kind} quota of ${v.maxPerDay}/day reached for this author (${v.postsToday} already today)`;
+    case NIP9A_V.WOT_GATE_FAILED:    return `web-of-trust gate (${v.gateCount}) refused this author`;
+    default:                          return `rule violation: ${v.type}`;
+  }
+}
+
+function hasImetaTag(event) {
+  if (!event || !Array.isArray(event.tags)) return false;
+  for (const t of event.tags) {
+    if (Array.isArray(t) && t[0] === 'imeta') return true;
+  }
+  return false;
+}
+
+function isWhitelisted(nip9a, pubkey) {
+  if (!nip9a) return false;
+  const rules = nip9a.active();
+  if (!rules) return false;
+  for (const r of rules.pubkeyRules) {
+    if (r.pubkey === pubkey && r.policy === 'allow') return true;
+  }
+  return false;
 }
 
 /**
@@ -322,4 +433,4 @@ function makeCache({ cachePath, namespace, max, ttlMs, logger }) {
   }
 }
 
-module.exports = { run, makeHandler, extractNip05, makeCache };
+module.exports = { run, makeHandler, extractNip05, makeCache, hasImetaTag, isWhitelisted, humanise };

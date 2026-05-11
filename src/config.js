@@ -16,6 +16,15 @@ function loadConfig(env = process.env) {
     throw new Error(`NAMECOIN_POLICY_MODE: invalid value "${mode}". Use "kind0-only" or "all-kinds-require-bit".`);
   }
 
+  // ── NIP-9A rules-enforcement layer (https://github.com/nostr-protocol/nips/pull/2331) ──
+  // When configured, accepted events (after .bit gating above) are validated
+  // against a kind:34551 rules document. See src/nip9a-loader.js for sources
+  // and src/nip9a-validator.js for evaluation order.
+  const nip9aRulesFile  = (env.NAMECOIN_POLICY_NIP9A_RULES_FILE || '').trim() || null;
+  const nip9aCommunity  = (env.NAMECOIN_POLICY_NIP9A_COMMUNITY || '').trim() || null;
+  const nip9aRequireRules = parseBool(env.NAMECOIN_POLICY_NIP9A_REQUIRE_RULES, false);
+  const nip9aRejectImetaKind1 = parseBool(env.NAMECOIN_POLICY_NIP9A_REJECT_IMETA_KIND1, false);
+
   const logLevel = (env.NAMECOIN_POLICY_LOG_LEVEL || 'info').trim();
   if (!['silent', 'info', 'debug'].includes(logLevel)) {
     throw new Error(`NAMECOIN_POLICY_LOG_LEVEL: invalid value "${logLevel}".`);
@@ -92,6 +101,10 @@ function loadConfig(env = process.env) {
     lookupBurst,
     lookupQueueMs,
     softFail,
+    nip9aRulesFile,
+    nip9aCommunity,
+    nip9aRequireRules,
+    nip9aRejectImetaKind1,
   };
 }
 
