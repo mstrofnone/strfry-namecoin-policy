@@ -176,7 +176,7 @@ Make both files executable and restart strfry. A full example is in
 
 | Variable | Default | Description |
 |---|---|---|
-| `NAMECOIN_ELECTRUMX_HOST` | *(required)* | Hostname of the ElectrumX server. **Without it, the plugin fails closed by default** — see `NAMECOIN_POLICY_SOFT_FAIL`. |
+| `NAMECOIN_ELECTRUMX_HOST` | *(required†)* | Hostname of the ElectrumX server. **Without it (and without `NAMECOIN_ELECTRUMX_HOSTS`), the plugin fails closed by default** — see `NAMECOIN_POLICY_SOFT_FAIL`. † Either `NAMECOIN_ELECTRUMX_HOST` or `NAMECOIN_ELECTRUMX_HOSTS` (multi-host) satisfies this requirement. |
 | `NAMECOIN_ELECTRUMX_PORT` | `50002` (TLS) / `50001` (TCP) | TCP port. |
 | `NAMECOIN_ELECTRUMX_TLS` | `true` | Use TLS (`true`/`false`). |
 | `NAMECOIN_ELECTRUMX_CERT_PIN` | — | One or more cert pins (comma-separated for rotation). Each pin is either a 64-hex SHA-256 of the DER cert, or `sha256/<base64>` for a SubjectPublicKeyInfo pin. When set, the system trust store is bypassed and only matching certs are accepted. |
@@ -192,7 +192,7 @@ Make both files executable and restart strfry. A full example is in
 | `NAMECOIN_POLICY_LOOKUP_RPS` | `5` | Sustained ElectrumX lookup rate (tokens/sec). Cache hits don't count. |
 | `NAMECOIN_POLICY_LOOKUP_BURST` | `10` | Max burst size for ElectrumX lookups. |
 | `NAMECOIN_POLICY_LOOKUP_QUEUE_MS` | `2000` | Max time (ms) a single lookup will wait for a token before returning a `rate-limited:` reject. |
-| `NAMECOIN_POLICY_SOFT_FAIL` | `false` | If `true` and `NAMECOIN_ELECTRUMX_HOST` is unset, accept all events without verification (legacy behavior). Default fails closed. |
+| `NAMECOIN_POLICY_SOFT_FAIL` | `false` | If `true` and neither `NAMECOIN_ELECTRUMX_HOST` nor `NAMECOIN_ELECTRUMX_HOSTS` is set, accept all events without verification (legacy behavior). Default fails closed. |
 | `NAMECOIN_POLICY_NIP9A_RULES_FILE` | — | Path to a signed `kind:34551` JSON event. Loaded at startup and re-read on `SIGHUP`. See [NIP-9A integration](#nip-9a-integration). |
 | `NAMECOIN_POLICY_NIP9A_COMMUNITY` | — | Owner-pinned community address pointer `34550:<hex64>:<d>`. Only rules events from the matching owner+d are accepted by the loader. |
 | `NAMECOIN_POLICY_NIP9A_REQUIRE_RULES` | `false` | If `true`, reject every non-rules event whenever no NIP-9A rules document is in force. Default is to pass through (rules absence ≠ deny-by-default per NIP). |
