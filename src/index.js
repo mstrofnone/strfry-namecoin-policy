@@ -67,11 +67,7 @@ async function run({ env = process.env, stdin = process.stdin, stdout = process.
   const logger = makeLogger(config.logLevel);
 
   if (config.insecure) emitInsecureBanner();
-  // Multi-host (NAMECOIN_ELECTRUMX_HOSTS) is the modern way to configure
-  // upstream ElectrumX endpoints; legacy single-host (NAMECOIN_ELECTRUMX_HOST)
-  // remains supported. Either one satisfies the "have a way to verify" check.
-  const hasUpstream = !!config.host || (Array.isArray(config.hosts) && config.hosts.length > 0);
-  if (!hasUpstream) emitNoHostBanner({ softFail: config.softFail });
+  if (shouldEmitNoHostBanner(config)) emitNoHostBanner({ softFail: config.softFail });
 
   // ── Metrics ─────────────────────────────────────────────────────────
   const metrics = config.metricsPort > 0 ? new Metrics() : new NullMetrics();
@@ -437,4 +433,19 @@ function makeCache({ cachePath, namespace, max, ttlMs, logger }) {
   }
 }
 
-module.exports = { run, makeHandler, extractNip05, makeCache, hasImetaTag, isWhitelisted, humanise };
+/**
+ * True iff the config has neither a single-host shorthand
+ * (NAMECOIN_ELECTRUMX_HOST) nor a non-empty multi-host list
+ * (NAMECOIN_ELECTRUMX_HOSTS). Either form drives a working
+ * ElectrumXClient, so we should not warn when only the multi-host form
+ * is set. Exported for tests.
+ *
+ * @param {{host?:string|null, hosts?:Array<unknown>|null}} cfg
+ */
+function shouldEmitNoHostBanner(cfg) {
+  if (cfg && cfg.host) return false;
+  if (cfg && Array.isArray(cfg.hosts) && cfg.hosts.length > 0) return false;
+  return true;
+}
+
+module.exports = { run, makeHandler, extractNip05, makeCache, hasImetaTag, isWhitelisted, humanise, shouldEmitNoHostBanner };
