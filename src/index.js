@@ -45,9 +45,9 @@ function emitInsecureBanner() {
 
 function emitNoHostBanner({ softFail }) {
   if (softFail) {
-    console.error('[strfry-namecoin-policy] WARN: NAMECOIN_ELECTRUMX_HOST not set and NAMECOIN_POLICY_SOFT_FAIL=true — accepting all events without verification (INSECURE).');
+    console.error('[strfry-namecoin-policy] WARN: NAMECOIN_ELECTRUMX_HOST and NAMECOIN_ELECTRUMX_HOSTS both unset and NAMECOIN_POLICY_SOFT_FAIL=true — accepting all events without verification (INSECURE).');
   } else {
-    console.error('[strfry-namecoin-policy] WARN: NAMECOIN_ELECTRUMX_HOST not set — rejecting all .bit lookups (set NAMECOIN_POLICY_SOFT_FAIL=true to bypass)');
+    console.error('[strfry-namecoin-policy] WARN: NAMECOIN_ELECTRUMX_HOST and NAMECOIN_ELECTRUMX_HOSTS both unset — rejecting all .bit lookups (set NAMECOIN_POLICY_SOFT_FAIL=true to bypass)');
   }
 }
 
@@ -67,7 +67,11 @@ async function run({ env = process.env, stdin = process.stdin, stdout = process.
   const logger = makeLogger(config.logLevel);
 
   if (config.insecure) emitInsecureBanner();
-  if (!config.host) emitNoHostBanner({ softFail: config.softFail });
+  // Multi-host (NAMECOIN_ELECTRUMX_HOSTS) is the modern way to configure
+  // upstream ElectrumX endpoints; legacy single-host (NAMECOIN_ELECTRUMX_HOST)
+  // remains supported. Either one satisfies the "have a way to verify" check.
+  const hasUpstream = !!config.host || (Array.isArray(config.hosts) && config.hosts.length > 0);
+  if (!hasUpstream) emitNoHostBanner({ softFail: config.softFail });
 
   // ── Metrics ─────────────────────────────────────────────────────────
   const metrics = config.metricsPort > 0 ? new Metrics() : new NullMetrics();

@@ -122,7 +122,42 @@ test('plugin: rejects .bit NIP-05 when no ElectrumX configured (fail-closed defa
   const res = JSON.parse(stdout.trim());
   assert.equal(res.action, 'reject');
   assert.match(res.msg, /Namecoin .bit NIP-05 verification unavailable/);
-  assert.match(stderr, /NAMECOIN_ELECTRUMX_HOST not set/);
+  assert.match(
+    stderr,
+    /NAMECOIN_ELECTRUMX_HOST and NAMECOIN_ELECTRUMX_HOSTS both unset/,
+  );
+});
+
+test('plugin: no spurious WARN when only NAMECOIN_ELECTRUMX_HOSTS is set', async () => {
+  // Regression: prior versions only checked `config.host` (singular) when
+  // deciding whether to emit the "no upstream configured" banner. Wrappers
+  // that only set the modern `_HOSTS` (plural) env var — the recommended
+  // multi-host shape — were getting a misleading WARN even though the
+  // ElectrumX client was correctly using the host list.
+  const event = {
+    type: 'new',
+    event: {
+      id: '5'.repeat(64), pubkey: '6'.repeat(64), kind: 0,
+      content: JSON.stringify({ nip05: 'alice@example.com' }),
+      tags: [], created_at: 1, sig: '00',
+    },
+  };
+  const { code, stderr } = await runPlugin({
+    env: {
+      NAMECOIN_POLICY_LOG_LEVEL: 'info',
+      // Use a clearly-unroutable host:port so the plugin will not actually
+      // connect; we only care about the startup banner here.
+      NAMECOIN_ELECTRUMX_HOSTS: '127.0.0.1:1,127.0.0.1:2',
+      NAMECOIN_ELECTRUMX_TLS: 'false',
+    },
+    inputLines: [JSON.stringify(event)],
+  });
+  assert.equal(code, 0);
+  assert.doesNotMatch(
+    stderr,
+    /NAMECOIN_ELECTRUMX_HOST.*unset/,
+    `unexpected no-host WARN despite NAMECOIN_ELECTRUMX_HOSTS being set; stderr=${stderr}`,
+  );
 });
 
 test('plugin: NAMECOIN_POLICY_SOFT_FAIL=true restores legacy accept-everything', async () => {
