@@ -33,5 +33,9 @@ export function loadConfig(env?: any): {
     lookupBurst: any;
     lookupQueueMs: any;
     softFail: any;
+    nip9aRulesFile: any;
+    nip9aCommunity: any;
+    nip9aRequireRules: any;
+    nip9aRejectImetaKind1: any;
 };
 export function makeLogger(level: any): (msgLevel: any, ...args: any[]) => void;

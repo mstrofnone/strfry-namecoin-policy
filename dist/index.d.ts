@@ -12,12 +12,13 @@ export function run({ env, stdin, stdout }?: {
  *
  * @returns {(req:any) => Promise<{id:any, action:string, msg?:string}>}
  */
-export function makeHandler({ config, resolver, verifiedAuthors, metrics, logger }: {
+export function makeHandler({ config, resolver, verifiedAuthors, metrics, logger, nip9a }: {
     config: any;
     resolver: any;
     verifiedAuthors: any;
     metrics: any;
     logger: any;
+    nip9a: any;
 }): (req: any) => Promise<{
     id: any;
     action: string;
@@ -74,4 +75,7 @@ export function makeCache({ cachePath, namespace, max, ttlMs, logger }: {
     readonly size: any;
     close(): void;
 };
+export function hasImetaTag(event: any): boolean;
+export function isWhitelisted(nip9a: any, pubkey: any): boolean;
+export function humanise(v: any): string;
 import { LRUCache } from "./cache";
