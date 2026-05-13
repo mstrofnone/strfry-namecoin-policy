@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * NIP-9A rules loader.
+ * NIP-9B rules loader.
  *
  * Maintains the active kind:34551 rules document for a strfry relay. Two
  * input sources (either, both, or neither — the loader is no-op when both

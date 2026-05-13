@@ -321,7 +321,7 @@ test('makeLogger: unknown msgLevel falls back to info-class threshold', () => {
   assert.equal(b.length, 0);
 });
 
-// ── NIP-9A config knobs ──
+// ── NIP-9B config knobs ──
 
 test('loadConfig: nip9a fields default to null/false', () => {
   const c = loadConfig({ NAMECOIN_ELECTRUMX_HOST: 'x' });

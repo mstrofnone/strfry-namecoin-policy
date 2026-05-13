@@ -142,7 +142,7 @@ describe('handler + nip9a: text-only baseline', () => {
     assert.match(res.msg, /deny-list/);
   });
 
-  it('rejects unverified .bit author before checking NIP-9A rules', async () => {
+  it('rejects unverified .bit author before checking NIP-9B rules', async () => {
     // verifiedAuthors empty -> author gate trips first.
     const handle = makeHandler({
       config: baseConfig(),
@@ -182,7 +182,7 @@ describe('handler + nip9a: text-only baseline', () => {
     });
     const res = await handle(newEvent({ kind: 1 }));
     assert.equal(res.action, 'reject');
-    assert.match(res.msg, /no NIP-9A rules document in force/);
+    assert.match(res.msg, /no NIP-9B rules document in force/);
   });
 
   it('absorbs incoming kind:34551 events into the loader', async () => {

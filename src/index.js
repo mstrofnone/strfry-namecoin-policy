@@ -127,7 +127,7 @@ async function run({ env = process.env, stdin = process.stdin, stdout = process.
     rateLimiter,
   }) : null;
 
-  // ── NIP-9A rules loader (https://github.com/nostr-protocol/nips/pull/2331) ──
+  // ── NIP-9B rules loader (https://github.com/nostr-protocol/nips/pull/2331) ──
   // Only constructed when at least one of file or community is set. If both
   // are unset the loader is null and no rules enforcement runs (back-compat
   // for v0.2.x deployments).
@@ -222,7 +222,7 @@ function makeHandler({ config, resolver, verifiedAuthors, metrics, logger, nip9a
       return reject(id, 'missing-pubkey', 'invalid: missing event.pubkey');
     }
 
-    // ── NIP-9A rules events: never block protocol traffic. The owner needs
+    // ── NIP-9B rules events: never block protocol traffic. The owner needs
     //    to be able to publish rules updates even if the current rules
     //    document does not whitelist kind:34551. Offer to the loader for
     //    live updates, then accept iff the .bit author gate would otherwise
@@ -231,7 +231,7 @@ function makeHandler({ config, resolver, verifiedAuthors, metrics, logger, nip9a
     //    See nip9a-refimpl/bin/strfry-policy.js for the same convention.
     if (kind === NIP9A_KIND && nip9a) {
       const accepted = nip9a.offer(event, 'stream');
-      logger('debug', `kind ${NIP9A_KIND} (NIP-9A rules) ${accepted ? 'absorbed' : 'ignored by loader'}`);
+      logger('debug', `kind ${NIP9A_KIND} (NIP-9B rules) ${accepted ? 'absorbed' : 'ignored by loader'}`);
       if (config.mode !== 'all-kinds-require-bit' || verifiedAuthors.has(pubkey)) {
         return accept(id);
       }
@@ -294,7 +294,7 @@ function makeHandler({ config, resolver, verifiedAuthors, metrics, logger, nip9a
       return accept(id);
     }
 
-    // ── Non-kind-0 events: .bit author gate first, then NIP-9A rules gate. ──
+    // ── Non-kind-0 events: .bit author gate first, then NIP-9B rules gate. ──
     if (config.mode === 'all-kinds-require-bit') {
       if (!verifiedAuthors.has(pubkey)) {
         return reject(id, 'unverified-author',
@@ -302,22 +302,22 @@ function makeHandler({ config, resolver, verifiedAuthors, metrics, logger, nip9a
       }
     }
 
-    // ── NIP-9A rules gate. Applies AFTER .bit verification so the rules
+    // ── NIP-9B rules gate. Applies AFTER .bit verification so the rules
     //    document only sees events from authors the relay has already
     //    decided are allowed to write at all. The whitelist `p allow` tags
-    //    are layered on top: NIP-9A's kind whitelist (`k`) gates the
+    //    are layered on top: NIP-9B's kind whitelist (`k`) gates the
     //    baseline; per-pubkey `p allow` tags can DENY only (per spec
     //    semantics, allow is informational unless the rules expand kinds
     //    via a parallel rules doc).
     //
-    //    See README "NIP-9A integration" and `nip9a-validator.js` for the
+    //    See README "NIP-9B integration" and `nip9a-validator.js` for the
     //    exact evaluation order.
     if (nip9a && (nip9a.hasActive() || config.nip9aRequireRules)) {
       const rules = nip9a.active();
       if (!rules) {
         if (config.nip9aRequireRules) {
           return reject(id, 'nip9a-no-rules',
-            'blocked: no NIP-9A rules document in force (relay startup or misconfiguration)');
+            'blocked: no NIP-9B rules document in force (relay startup or misconfiguration)');
         }
       } else {
         const violation = nip9aValidate(rules, {
@@ -325,7 +325,7 @@ function makeHandler({ config, resolver, verifiedAuthors, metrics, logger, nip9a
           kind,
           sizeBytes: nip9aSize(event),
           // No quota tracking in this layer; see README "Limitations".
-          // No WoT resolver here; relays SHOULD defer WoT to clients per NIP-9A.
+          // No WoT resolver here; relays SHOULD defer WoT to clients per NIP-9B.
         });
         if (violation) {
           return reject(id, `nip9a:${violation.type}`,
@@ -335,7 +335,7 @@ function makeHandler({ config, resolver, verifiedAuthors, metrics, logger, nip9a
     }
 
     // ── Optional defence-in-depth: reject kind:1 with imeta tags from
-    //    non-whitelisted authors. NIP-9A's `k` tag whitelists kinds, but
+    //    non-whitelisted authors. NIP-9B's `k` tag whitelists kinds, but
     //    kind:1 events can still carry file attachments via `imeta` tags
     //    (NIP-92) pointing at Blossom / IPFS / arbitrary http(s) hosts.
     //    Operators wanting hard "text-only kind:1" should enable this and

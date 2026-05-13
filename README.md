@@ -241,9 +241,9 @@ Make both files executable and restart strfry. A full example is in
 | `NAMECOIN_POLICY_LOOKUP_BURST` | `10` | Max burst size for ElectrumX lookups. |
 | `NAMECOIN_POLICY_LOOKUP_QUEUE_MS` | `2000` | Max time (ms) a single lookup will wait for a token before returning a `rate-limited:` reject. |
 | `NAMECOIN_POLICY_SOFT_FAIL` | `false` | If `true` and neither `NAMECOIN_ELECTRUMX_HOST` nor `NAMECOIN_ELECTRUMX_HOSTS` is set, accept all events without verification (legacy behavior). Default fails closed. |
-| `NAMECOIN_POLICY_NIP9A_RULES_FILE` | — | Path to a signed `kind:34551` JSON event. Loaded at startup and re-read on `SIGHUP`. See [NIP-9A integration](#nip-9a-integration). |
+| `NAMECOIN_POLICY_NIP9A_RULES_FILE` | — | Path to a signed `kind:34551` JSON event. Loaded at startup and re-read on `SIGHUP`. See [NIP-9B integration](#nip-9b-integration). |
 | `NAMECOIN_POLICY_NIP9A_COMMUNITY` | — | Owner-pinned community address pointer `34550:<hex64>:<d>`. Only rules events from the matching owner+d are accepted by the loader. |
-| `NAMECOIN_POLICY_NIP9A_REQUIRE_RULES` | `false` | If `true`, reject every non-rules event whenever no NIP-9A rules document is in force. Default is to pass through (rules absence ≠ deny-by-default per NIP). |
+| `NAMECOIN_POLICY_NIP9A_REQUIRE_RULES` | `false` | If `true`, reject every non-rules event whenever no NIP-9B rules document is in force. Default is to pass through (rules absence ≠ deny-by-default per NIP). |
 | `NAMECOIN_POLICY_NIP9A_REJECT_IMETA_KIND1` | `false` | Defence-in-depth: reject `kind:1` events with `imeta` tags (NIP-92) from authors that are not explicitly `p allow` in the rules document. Lets relays enforce "text-only kind:1 except for whitelisted uploaders" without inventing a non-spec extension. |
 
 ### Cert pin formats
@@ -277,9 +277,11 @@ export NAMECOIN_ELECTRUMX_CERT_PIN="<local-der-sha256-hex>,<public-der-sha256-he
 | `NAMECOIN_POLICY_METRICS_PORT` | `0` | If non-zero, expose Prometheus metrics on `127.0.0.1:<port>/metrics`. Always bound to localhost. |
 | `NAMECOIN_POLICY_POOL_KEEPALIVE_MS` | `30000` | Idle timeout for the warm ElectrumX connection pool. Set to `0` to use one-connection-per-resolve mode. |
 
-## NIP-9A integration
+## NIP-9B integration
 
-This plugin can enforce a [NIP-9A](https://github.com/nostr-protocol/nips/pull/2331)
+> **Slot renumber note (2026-05-14):** the upstream NIP draft renumbered from `9A` to `9B` (see [#2331](https://github.com/nostr-protocol/nips/pull/2331)) to avoid collision with [#2194](https://github.com/nostr-protocol/nips/pull/2194). Environment variable names (`NAMECOIN_POLICY_NIP9A_*`) and internal file/symbol names still carry the `9a` slot to preserve the live `relay.testls.bit` deployment contract; they will be aligned in a follow-up once the spec number is final. Kind `34551`, schema, and behaviour are unchanged.
+
+This plugin can enforce a [NIP-9B](https://github.com/nostr-protocol/nips/pull/2331)
 *Verifiable Community Rules* document on top of the Namecoin `.bit` author
 gate. The rules document is a signed `kind:34551` event published by the
 community owner; it declares the whitelisted event kinds, optional per-kind
@@ -293,7 +295,7 @@ cross-implementation tests in that repo assert wire compatibility.
 ### When to enable it
 
 This plugin's `mode=all-kinds-require-bit` already gates *who* can publish.
-NIP-9A gates *what* they can publish:
+NIP-9B gates *what* they can publish:
 
 - **"Anyone with a verified `.bit` identity can post text, only whitelisted
   pubkeys can post other kinds"** — the textbook deployment, and the reason
@@ -330,14 +332,14 @@ See [`src/nip9a-loader.js`](src/nip9a-loader.js) for the implementation.
 
 ### Whitelist semantics (important)
 
-NIP-9A's `p allow` does **not** silently expand the kind whitelist — that
+NIP-9B's `p allow` does **not** silently expand the kind whitelist — that
 would let any allow-listed pubkey publish kinds the rules don't declare,
 bypassing the document's whole point. Whitelist semantics in this plugin are:
 
 - `p allow` bypasses the **WoT gate** for that pubkey.
 - `p allow` allows that pubkey to publish `kind:1` with `imeta` tags when
   `NAMECOIN_POLICY_NIP9A_REJECT_IMETA_KIND1=true` (this plugin's
-  defence-in-depth toggle, *not* a NIP-9A semantic — orthogonal layer).
+  defence-in-depth toggle, *not* a NIP-9B semantic — orthogonal layer).
 - `p deny` rejects that pubkey from publishing any kind, overriding any
   `p allow` for the same pubkey (spec semantics).
 

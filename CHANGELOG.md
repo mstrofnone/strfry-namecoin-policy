@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## v0.3.0 — unreleased
 
 ### Added
-- **NIP-9A rules enforcement.** New optional layer that validates accepted
+- **NIP-9B rules enforcement.** New optional layer that validates accepted
   events against a signed `kind:34551` *Verifiable Community Rules*
   document
   ([nostr-protocol/nips#2331](https://github.com/nostr-protocol/nips/pull/2331)).
@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
       pointer that filters which rules events the loader accepts.
     - `NAMECOIN_POLICY_NIP9A_REQUIRE_RULES` — reject everything when the
       loader has no active rules document. Default `false`; rules
-      absence is pass-through per NIP-9A behaviour spec.
+      absence is pass-through per NIP-9B behaviour spec.
     - `NAMECOIN_POLICY_NIP9A_REJECT_IMETA_KIND1` — defence-in-depth
       toggle for the common "text-only kind:1 except whitelisted
       uploaders" deployment.
@@ -37,8 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Behaviour change (back-compat)
 - `kind:34551` events are still accepted by the standard `.bit` author
-  gate. With NIP-9A integration disabled (the default), behaviour is
-  unchanged. With NIP-9A integration on, `kind:34551` events are accepted
+  gate. With NIP-9B integration disabled (the default), behaviour is
+  unchanged. With NIP-9B integration on, `kind:34551` events are accepted
   unconditionally for `kind0-only` mode and require a verified `.bit`
   author for `all-kinds-require-bit` mode — the kind-whitelist check is
   bypassed for protocol events so the owner can publish rules updates

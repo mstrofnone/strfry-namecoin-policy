@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * NIP-9A rules event parser (CommonJS port of nip9a-refimpl/lib/parser.js).
+ * NIP-9B rules event parser (CommonJS port of nip9a-refimpl/lib/parser.js).
  *
  * Parses a `kind:34551` event into a structured object. Pure: no I/O, no
  * dependencies. Same contract as the Quartz `CommunityRulesEvent` accessors

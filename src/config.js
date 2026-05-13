@@ -16,7 +16,7 @@ function loadConfig(env = process.env) {
     throw new Error(`NAMECOIN_POLICY_MODE: invalid value "${mode}". Use "kind0-only" or "all-kinds-require-bit".`);
   }
 
-  // ── NIP-9A rules-enforcement layer (https://github.com/nostr-protocol/nips/pull/2331) ──
+  // ── NIP-9B rules-enforcement layer (https://github.com/nostr-protocol/nips/pull/2331) ──
   // When configured, accepted events (after .bit gating above) are validated
   // against a kind:34551 rules document. See src/nip9a-loader.js for sources
   // and src/nip9a-validator.js for evaluation order.

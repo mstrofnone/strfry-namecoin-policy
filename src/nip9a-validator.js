@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * NIP-9A validator (CommonJS port of nip9a-refimpl/lib/validator.js).
+ * NIP-9B validator (CommonJS port of nip9a-refimpl/lib/validator.js).
  *
  * Same evaluation order as the Kotlin/Quartz `CommunityRulesValidator.kt`
  * in vitorpamplona/amethyst#2758 and the JS reference in nip9a-refimpl:
